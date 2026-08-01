@@ -35,7 +35,7 @@ export function NavFavorites() {
   const { channels, activeChannelId, selectChannel, agentTouch } = useChat()
 
   return (
-    <SidebarGroup className="group-data-[collapsible=icon]:hidden">
+    <SidebarGroup className="pt-0 group-data-[collapsible=icon]:hidden">
       <SidebarGroupLabel>Chats</SidebarGroupLabel>
       <SidebarMenu>
         {channels.map((channel) => (

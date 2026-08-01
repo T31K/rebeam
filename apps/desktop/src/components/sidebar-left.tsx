@@ -289,7 +289,7 @@ export function SidebarLeft({
 }: React.ComponentProps<typeof Sidebar>) {
   return (
     <Sidebar className="border-r-0" {...props}>
-      <SidebarHeader>
+      <SidebarHeader className="pb-0">
         <TeamSwitcher teams={data.teams} />
         {/* <NavMain items={data.navMain} /> */}
       </SidebarHeader>
