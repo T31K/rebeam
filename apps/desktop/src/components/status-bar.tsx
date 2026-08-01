@@ -1,3 +1,5 @@
+import { useState } from "react";
+import { ActivitySheet } from "@/components/activity-sheet";
 import { useChat } from "@/lib/use-chat";
 
 function Key({ children }: { children: React.ReactNode }) {
@@ -19,14 +21,19 @@ function Hint({ keys, label }: { keys: string; label: string }) {
 
 export function StatusBar() {
   const { channels, activeChannelId } = useChat();
+  const [activityOpen, setActivityOpen] = useState(false);
   const idx = channels.findIndex((c) => c.id === activeChannelId);
 
   return (
     <footer className="fixed inset-x-0 bottom-0 z-30 flex h-7 items-center gap-4 border-t bg-sidebar px-3 font-mono text-[11px] text-muted-foreground">
-      <span className="flex items-center gap-1.5">
+      <button
+        className="flex items-center gap-1.5 rounded-sm px-1 transition-colors hover:bg-muted/40 hover:text-foreground"
+        onClick={() => setActivityOpen(true)}
+      >
         <span className="size-1.5 rounded-full bg-emerald-400" />
         connected · mock relay
-      </span>
+      </button>
+      <ActivitySheet open={activityOpen} onOpenChange={setActivityOpen} />
       <div className="ml-auto flex items-center gap-4">
         <Hint keys="⌘K" label="agent" />
         <Hint keys="⌘J" label="caddy" />
