@@ -28,7 +28,11 @@ export function MembersSidebar() {
   const agents = members.filter((m) => m.type === "agent");
 
   return (
-    <Sidebar side="right" collapsible="none" className="hidden w-56 lg:flex">
+    <Sidebar
+      side="right"
+      collapsible="none"
+      className="hidden h-svh w-56 pb-7 pt-11 lg:flex"
+    >
       <SidebarContent>
         <SidebarGroup>
           <SidebarGroupLabel>Agents</SidebarGroupLabel>
