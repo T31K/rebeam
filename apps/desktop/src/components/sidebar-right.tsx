@@ -2,12 +2,11 @@ import * as React from "react"
 
 import { Calendars } from "@/components/calendars"
 import { DatePicker } from "@/components/date-picker"
-import { NavUser } from "@/components/nav-user"
+// import { NavUser } from "@/components/nav-user"
 import {
   Sidebar,
   SidebarContent,
   SidebarFooter,
-  SidebarHeader,
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
@@ -49,9 +48,7 @@ export function SidebarRight({
       className={cn("sticky top-0 hidden h-svh border-l lg:flex", className)}
       {...props}
     >
-      <SidebarHeader className="h-16 border-b border-sidebar-border">
-        <NavUser user={data.user} />
-      </SidebarHeader>
+      {/* user card moved to the left sidebar footer */}
       <SidebarContent>
         <DatePicker />
         <SidebarSeparator className="mx-0" />

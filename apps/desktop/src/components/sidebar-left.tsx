@@ -3,13 +3,15 @@
 import * as React from "react"
 
 import { NavFavorites } from "@/components/nav-favorites"
+import { NavUser } from "@/components/nav-user"
 // import { NavMain } from "@/components/nav-main"
-import { NavSecondary } from "@/components/nav-secondary"
+// import { NavSecondary } from "@/components/nav-secondary"
 import { NavWorkspaces } from "@/components/nav-workspaces"
 import { TeamSwitcher } from "@/components/team-switcher"
 import {
   Sidebar,
   SidebarContent,
+  SidebarFooter,
   SidebarHeader,
   SidebarRail,
 } from "@/components/ui/sidebar"
@@ -294,8 +296,11 @@ export function SidebarLeft({
       <SidebarContent>
         <NavFavorites />
         <NavWorkspaces workspaces={data.workspaces} />
-        <NavSecondary items={data.navSecondary} className="mt-auto" />
+        {/* <NavSecondary items={data.navSecondary} className="mt-auto" /> */}
       </SidebarContent>
+      <SidebarFooter>
+        <NavUser user={{ name: "t31k", email: "t31kmunwong@gmail.com", avatar: "" }} />
+      </SidebarFooter>
       <SidebarRail />
     </Sidebar>
   )
