@@ -287,9 +287,14 @@ export function SidebarLeft({
 }: React.ComponentProps<typeof Sidebar>) {
   return (
     <Sidebar className="border-r-0" {...props}>
-      <SidebarHeader>
-        <TeamSwitcher teams={data.teams} />
-        <NavMain items={data.navMain} />
+      <SidebarHeader className="p-0">
+        {/* traffic lights live in this row */}
+        <div data-tauri-drag-region className="flex h-12 items-center pl-16 pr-2">
+          <TeamSwitcher teams={data.teams} />
+        </div>
+        <div className="px-2 pb-2">
+          <NavMain items={data.navMain} />
+        </div>
       </SidebarHeader>
       <SidebarContent>
         <NavFavorites favorites={data.favorites} />

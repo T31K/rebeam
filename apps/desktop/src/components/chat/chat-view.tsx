@@ -17,12 +17,18 @@ function WorkingIndicator() {
 }
 
 export function ChatView() {
-  const { channels, activeChannelId } = useChat();
+  const { channels, activeChannelId, members } = useChat();
   const channel = channels.find((c) => c.id === activeChannelId);
+  const online = members.filter(
+    (m) => m.type === "agent" && m.presence === "online",
+  ).length;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <header className="flex h-10 shrink-0 items-center gap-2 border-b px-4">
+      <header
+        data-tauri-drag-region
+        className="flex h-12 shrink-0 items-center gap-2 border-b px-4"
+      >
         <HashIcon className="size-4 text-muted-foreground" />
         <span className="text-sm font-semibold">{channel?.name ?? "…"}</span>
         {channel?.topic && (
@@ -30,6 +36,12 @@ export function ChatView() {
             {channel.topic}
           </span>
         )}
+        <span
+          data-tauri-drag-region
+          className="ml-auto font-mono text-[11px] text-muted-foreground"
+        >
+          {online} agent{online === 1 ? "" : "s"} online
+        </span>
       </header>
       <MessageList />
       <WorkingIndicator />

@@ -10,7 +10,6 @@ import { ChatView } from "@/components/chat/chat-view";
 import { InviteModal } from "@/components/invite-modal";
 import { PrefsModal } from "@/components/prefs-modal";
 import { CaddyPanel } from "@/components/caddy-panel";
-import { TitleBar } from "@/components/title-bar";
 import { StatusBar } from "@/components/status-bar";
 import { CommandPalette } from "@/components/command-palette";
 import { useChat } from "@/lib/use-chat";
@@ -84,9 +83,8 @@ export default function App() {
   return (
     <SidebarProvider>
       <Shortcuts />
-      <TitleBar />
       <SidebarLeft />
-      <SidebarInset className="h-svh min-h-0 overflow-hidden pb-7 pt-11">
+      <SidebarInset className="h-svh min-h-0 overflow-hidden pb-7">
         <ChatView />
       </SidebarInset>
       <div
@@ -95,7 +93,7 @@ export default function App() {
           (rightSidebarOpen ? "w-(--sidebar-width)" : "w-0")
         }
       >
-        <SidebarRight className="pb-7 pt-11" />
+        <SidebarRight className="pb-7" />
       </div>
       <StatusBar />
       <CommandPalette />
