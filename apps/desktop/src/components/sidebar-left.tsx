@@ -3,7 +3,7 @@
 import * as React from "react"
 
 import { NavFavorites } from "@/components/nav-favorites"
-import { NavMain } from "@/components/nav-main"
+// import { NavMain } from "@/components/nav-main"
 import { NavSecondary } from "@/components/nav-secondary"
 import { NavWorkspaces } from "@/components/nav-workspaces"
 import { TeamSwitcher } from "@/components/team-switcher"
@@ -289,7 +289,7 @@ export function SidebarLeft({
     <Sidebar className="border-r-0" {...props}>
       <SidebarHeader>
         <TeamSwitcher teams={data.teams} />
-        <NavMain items={data.navMain} />
+        {/* <NavMain items={data.navMain} /> */}
       </SidebarHeader>
       <SidebarContent>
         <NavFavorites favorites={data.favorites} />
