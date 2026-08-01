@@ -32,7 +32,7 @@ export default function App() {
     <SidebarProvider>
       <TitleBar />
       <AppSidebar />
-      <SidebarInset className="min-h-0 pb-7 pt-10">
+      <SidebarInset className="min-h-0 pb-7 pt-12">
         <ChatView />
       </SidebarInset>
       <StatusBar />
