@@ -21,15 +21,20 @@ import {
   BellOffIcon,
   HashIcon,
   PlusIcon,
+  MessageCircleIcon,
+  WrenchIcon,
+  FlaskConicalIcon,
+  SparklesIcon,
+  type LucideIcon,
 } from "lucide-react"
 import { useChat } from "@/lib/use-chat"
 import { cn } from "@/lib/utils"
 
-const CHANNEL_EMOJI: Record<string, string> = {
-  main: "💬",
-  dev: "🛠️",
-  research: "🔬",
-  showcase: "✨",
+const CHANNEL_ICONS: Record<string, LucideIcon> = {
+  main: MessageCircleIcon,
+  dev: WrenchIcon,
+  research: FlaskConicalIcon,
+  showcase: SparklesIcon,
 }
 
 export function NavFavorites() {
@@ -54,7 +59,10 @@ export function NavFavorites() {
                 agentTouch === `channel:${channel.id}` && "agent-touch",
               )}
             >
-              <span>{CHANNEL_EMOJI[channel.name] ?? "#"}</span>
+              {(() => {
+                const Icon = CHANNEL_ICONS[channel.name] ?? HashIcon
+                return <Icon className="size-4 text-muted-foreground" />
+              })()}
               <span className="capitalize">{channel.name}</span>
             </SidebarMenuButton>
             <DropdownMenu>
