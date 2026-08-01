@@ -201,6 +201,34 @@ a:hover .animated-underline,
     text-decoration-color: currentColor;
 }
 
+/* scrollbars: thin thumb, no track, inside the pane */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+    background: transparent;
+}
+
+::-webkit-scrollbar-button {
+    display: none;
+}
+
+::-webkit-scrollbar-thumb {
+    background: oklch(1 0 0 / 12%);
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: oklch(1 0 0 / 22%);
+    border: 2px solid transparent;
+    background-clip: padding-box;
+}
+
 /* control the in-app agent is currently "pressing" */
 .agent-touch {
     background: oklch(0.62 0.19 300 / 16%) !important;
