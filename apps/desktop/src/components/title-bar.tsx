@@ -10,7 +10,7 @@ export function TitleBar() {
   return (
     <header
       data-tauri-drag-region
-      className="fixed inset-x-0 top-0 z-30 flex h-10 items-center border-b bg-sidebar px-3"
+      className="fixed inset-x-0 top-0 z-30 flex h-9.5 items-center border-b bg-sidebar px-3"
     >
       {/* clearance for macOS traffic lights */}
       <div className="w-16 shrink-0" data-tauri-drag-region />

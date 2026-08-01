@@ -92,7 +92,7 @@ function ResizeHandle({
 }) {
   return (
     <div
-      className="fixed bottom-7 top-10 z-40 w-1.5 cursor-col-resize"
+      className="fixed bottom-7 top-9.5 z-40 w-1.5 cursor-col-resize"
       style={side === "left" ? { left: offset - 3 } : { right: offset - 3 }}
       onPointerDown={(e) => {
         e.preventDefault();
@@ -184,7 +184,7 @@ export default function App() {
         onDrag={(x) => setLeftWidth(clampSidebar(x))}
         onDragging={setResizing}
       />
-      <SidebarInset className="h-svh min-h-0 overflow-hidden pb-7 pt-10">
+      <SidebarInset className="h-svh min-h-0 overflow-hidden pb-7 pt-9.5">
         <ChatView />
       </SidebarInset>
       <div
@@ -195,7 +195,7 @@ export default function App() {
         style={{ width: rightSidebarOpen ? rightWidth : 0 }}
       >
         <SidebarRight
-          className="pb-7 pt-10"
+          className="pb-7 pt-9.5"
           style={{ "--sidebar-width": `${rightWidth}px` } as CSSProperties}
         />
       </div>
