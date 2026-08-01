@@ -103,14 +103,26 @@ const seedMessages: Message[] = [
   },
 ];
 
-const demoSeeds: { authorId: string; text: string; demo: string }[] = [
-  { authorId: "a_claude", text: "Working on it…", demo: "loading" },
-  { authorId: "a_claude", text: "", demo: "thinking" },
+const demoSeeds: { authorId: string; text: string; demo?: string }[] = [
+  {
+    authorId: "u_t31k",
+    text: "@claude-main the churn scheduler is double-booking freezer slots. Fix it and ship.",
+  },
+  { authorId: "a_claude", text: "Looking at it now.", demo: "thinking" },
+  { authorId: "a_claude", text: "Found it — overlapping windows. Fixing:", demo: "tool-chips" },
+  { authorId: "a_claude", text: "New scheduling core:", demo: "code" },
+  {
+    authorId: "u_t31k",
+    text: "@kimi-research any prior art on how others handle slot conflicts?",
+  },
   { authorId: "a_kimi", text: "", demo: "streaming" },
-  { authorId: "a_claude", text: "", demo: "tool-chips" },
-  { authorId: "a_claude", text: "", demo: "code" },
-  { authorId: "a_codex", text: "", demo: "tasks" },
-  { authorId: "a_claude", text: "", demo: "approval-flow" },
+  { authorId: "a_codex", text: "Picked up the branch, running the pipeline:", demo: "tasks" },
+  {
+    authorId: "a_claude",
+    text: "Everything's green. A few decisions before I ship:",
+    demo: "approval-flow",
+  },
+  { authorId: "a_codex", text: "Deploying to staging…", demo: "loading" },
 ];
 
 demoSeeds.forEach((seed, i) => {
