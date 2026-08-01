@@ -14,6 +14,7 @@ import {
   SidebarSeparator,
 } from "@/components/ui/sidebar"
 import { PlusIcon } from "lucide-react"
+import { cn } from "@/lib/utils"
 
 // This is sample data.
 const data = {
@@ -39,12 +40,13 @@ const data = {
 }
 
 export function SidebarRight({
+  className,
   ...props
 }: React.ComponentProps<typeof Sidebar>) {
   return (
     <Sidebar
       collapsible="none"
-      className="sticky top-0 hidden h-svh border-l lg:flex"
+      className={cn("sticky top-0 hidden h-svh border-l lg:flex", className)}
       {...props}
     >
       <SidebarHeader className="h-16 border-b border-sidebar-border">
