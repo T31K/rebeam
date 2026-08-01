@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { HashIcon, PlusIcon, AtSignIcon } from "lucide-react";
 import {
+  Command,
   CommandDialog,
   CommandEmpty,
   CommandGroup,
@@ -36,6 +37,7 @@ export function CommandPalette() {
 
   return (
     <CommandDialog open={open} onOpenChange={setOpen}>
+      <Command>
       <CommandInput placeholder="Jump to a channel, mention someone, or run a command…" />
       <CommandList>
         <CommandEmpty>Nothing matches.</CommandEmpty>
@@ -87,6 +89,7 @@ export function CommandPalette() {
           </CommandItem>
         </CommandGroup>
       </CommandList>
+      </Command>
     </CommandDialog>
   );
 }
