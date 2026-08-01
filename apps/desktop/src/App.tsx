@@ -1,9 +1,10 @@
-import { useEffect } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   SidebarInset,
   SidebarProvider,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { cn } from "@/lib/utils";
 import { SidebarLeft } from "@/components/sidebar-left";
 import { SidebarRight } from "@/components/sidebar-right";
 import { ChatView } from "@/components/chat/chat-view";
@@ -66,9 +67,99 @@ function Shortcuts() {
   return null;
 }
 
+const clamp = (v: number, lo: number, hi: number) =>
+  Math.min(hi, Math.max(lo, v));
+
+/** sidebars stay between 180px and 35% of the window */
+const clampSidebar = (v: number) =>
+  clamp(v, 180, Math.round(window.innerWidth * 0.35));
+
+function storedWidth(key: string, fallback: number) {
+  const v = Number(localStorage.getItem(key));
+  return v > 0 ? v : fallback;
+}
+
+function ResizeHandle({
+  side,
+  offset,
+  onDrag,
+  onDragging,
+}: {
+  side: "left" | "right";
+  offset: number;
+  onDrag: (clientX: number) => void;
+  onDragging: (dragging: boolean) => void;
+}) {
+  return (
+    <div
+      className="fixed bottom-7 top-10 z-40 w-1.5 cursor-col-resize transition-colors hover:bg-primary/25 active:bg-primary/40"
+      style={side === "left" ? { left: offset - 3 } : { right: offset - 3 }}
+      onPointerDown={(e) => {
+        e.preventDefault();
+        onDragging(true);
+        const move = (ev: PointerEvent) => onDrag(ev.clientX);
+        const up = () => {
+          onDragging(false);
+          window.removeEventListener("pointermove", move);
+          window.removeEventListener("pointerup", up);
+        };
+        window.addEventListener("pointermove", move);
+        window.addEventListener("pointerup", up);
+      }}
+    />
+  );
+}
+
+function LeftResizeHandle({
+  width,
+  onDrag,
+  onDragging,
+}: {
+  width: number;
+  onDrag: (x: number) => void;
+  onDragging: (d: boolean) => void;
+}) {
+  const { state } = useSidebar();
+  if (state !== "expanded") return null;
+  return (
+    <ResizeHandle
+      side="left"
+      offset={width}
+      onDrag={onDrag}
+      onDragging={onDragging}
+    />
+  );
+}
+
 export default function App() {
   const init = useChat((s) => s.init);
   const rightSidebarOpen = useChat((s) => s.rightSidebarOpen);
+  const [leftWidth, setLeftWidth] = useState(() =>
+    storedWidth("agentchat.leftWidth", 256),
+  );
+  const [rightWidth, setRightWidth] = useState(() =>
+    storedWidth("agentchat.rightWidth", 256),
+  );
+  const [resizing, setResizing] = useState(false);
+  const saveTimer = useRef<number | undefined>(undefined);
+
+  useEffect(() => {
+    window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => {
+      localStorage.setItem("agentchat.leftWidth", String(leftWidth));
+      localStorage.setItem("agentchat.rightWidth", String(rightWidth));
+    }, 300);
+  }, [leftWidth, rightWidth]);
+
+  useEffect(() => {
+    // window shrinks re-clamp both sidebars
+    const onResize = () => {
+      setLeftWidth((w) => clampSidebar(w));
+      setRightWidth((w) => clampSidebar(w));
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   useEffect(() => {
     void init();
@@ -82,21 +173,40 @@ export default function App() {
   }, []);
 
   return (
-    <SidebarProvider>
+    <SidebarProvider
+      style={{ "--sidebar-width": `${leftWidth}px` } as CSSProperties}
+    >
       <Shortcuts />
       <TitleBar />
       <SidebarLeft />
-      <SidebarInset className="h-svh min-h-0 overflow-hidden pb-7 pt-11">
+      <LeftResizeHandle
+        width={leftWidth}
+        onDrag={(x) => setLeftWidth(clampSidebar(x))}
+        onDragging={setResizing}
+      />
+      <SidebarInset className="h-svh min-h-0 overflow-hidden pb-7 pt-10">
         <ChatView />
       </SidebarInset>
       <div
-        className={
-          "shrink-0 overflow-hidden transition-[width] duration-200 ease-linear " +
-          (rightSidebarOpen ? "w-(--sidebar-width)" : "w-0")
-        }
+        className={cn(
+          "shrink-0 overflow-hidden",
+          !resizing && "transition-[width] duration-200 ease-linear",
+        )}
+        style={{ width: rightSidebarOpen ? rightWidth : 0 }}
       >
-        <SidebarRight className="pb-7 pt-11" />
+        <SidebarRight
+          className="pb-7 pt-10"
+          style={{ "--sidebar-width": `${rightWidth}px` } as CSSProperties}
+        />
       </div>
+      {rightSidebarOpen && (
+        <ResizeHandle
+          side="right"
+          offset={rightWidth}
+          onDrag={(x) => setRightWidth(clampSidebar(window.innerWidth - x))}
+          onDragging={setResizing}
+        />
+      )}
       <StatusBar />
       <CommandPalette />
       <CaddyPanel />
