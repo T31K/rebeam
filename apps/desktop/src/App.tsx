@@ -72,7 +72,7 @@ export default function App() {
       <Shortcuts />
       <TitleBar />
       <AppSidebar />
-      <SidebarInset className="min-h-0 pb-7 pt-11">
+      <SidebarInset className="h-svh min-h-0 overflow-hidden pb-7 pt-11">
         <ChatView />
       </SidebarInset>
       <StatusBar />

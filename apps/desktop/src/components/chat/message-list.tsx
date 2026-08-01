@@ -89,8 +89,8 @@ export function MessageList() {
 
   return (
     <MessageScrollerProvider>
-      <MessageScroller className="flex-1">
-        <MessageScrollerViewport className="mr-2">
+      <MessageScroller className="min-h-0 flex-1">
+        <MessageScrollerViewport>
           <MessageScrollerContent className="gap-0 px-4 py-3">
             {grouped.map(({ message, continuation }) => (
               <MessageScrollerItem key={message.id}>
