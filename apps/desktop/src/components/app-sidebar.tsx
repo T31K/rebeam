@@ -1,5 +1,13 @@
 import * as React from "react";
-import { HashIcon, PlusIcon } from "lucide-react";
+import { AtSignIcon, BellOffIcon, CopyIcon, HashIcon, PlusIcon, UnplugIcon } from "lucide-react";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuShortcut,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 
 import {
   Sidebar,
@@ -19,8 +27,14 @@ import { useChat } from "@/lib/use-chat";
 import { cn } from "@/lib/utils";
 
 export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
-  const { channels, members, activeChannelId, selectChannel, setInviteOpen } =
-    useChat();
+  const {
+    channels,
+    members,
+    activeChannelId,
+    selectChannel,
+    setInviteOpen,
+    setComposerInsert,
+  } = useChat();
   const humans = members.filter((m) => m.type === "human");
   const agents = members.filter((m) => m.type === "agent");
 
@@ -37,15 +51,36 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
           <SidebarGroupLabel>Channels</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              {channels.map((channel) => (
+              {channels.map((channel, i) => (
                 <SidebarMenuItem key={channel.id}>
-                  <SidebarMenuButton
-                    isActive={channel.id === activeChannelId}
-                    onClick={() => selectChannel(channel.id)}
-                  >
-                    <HashIcon className="size-3.5 text-muted-foreground" />
-                    <span>{channel.name}</span>
-                  </SidebarMenuButton>
+                  <ContextMenu>
+                    <ContextMenuTrigger asChild>
+                      <SidebarMenuButton
+                        isActive={channel.id === activeChannelId}
+                        onClick={() => selectChannel(channel.id)}
+                      >
+                        <HashIcon className="size-3.5 text-muted-foreground" />
+                        <span>{channel.name}</span>
+                      </SidebarMenuButton>
+                    </ContextMenuTrigger>
+                    <ContextMenuContent className="w-48">
+                      <ContextMenuItem onSelect={() => void selectChannel(channel.id)}>
+                        <HashIcon className="size-4" /> Open channel
+                        <ContextMenuShortcut>⌘{i + 1}</ContextMenuShortcut>
+                      </ContextMenuItem>
+                      <ContextMenuItem
+                        onSelect={() =>
+                          void navigator.clipboard.writeText(`#${channel.name}`)
+                        }
+                      >
+                        <CopyIcon className="size-4" /> Copy name
+                      </ContextMenuItem>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem disabled>
+                        <BellOffIcon className="size-4" /> Mute channel
+                      </ContextMenuItem>
+                    </ContextMenuContent>
+                  </ContextMenu>
                 </SidebarMenuItem>
               ))}
             </SidebarMenu>
@@ -64,18 +99,41 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
             <SidebarMenu>
               {agents.map((agent) => (
                 <SidebarMenuItem key={agent.id}>
-                  <SidebarMenuButton className="h-9">
-                    <MemberAvatar member={agent} className="size-6" />
-                    <span
-                      className={cn(
-                        "flex-1 truncate",
-                        agent.presence === "offline" && "text-muted-foreground",
-                      )}
-                    >
-                      {agent.name}
-                    </span>
-                    <PresenceDot member={agent} />
-                  </SidebarMenuButton>
+                  <ContextMenu>
+                    <ContextMenuTrigger asChild>
+                      <SidebarMenuButton className="h-9">
+                        <MemberAvatar member={agent} className="size-6" />
+                        <span
+                          className={cn(
+                            "flex-1 truncate",
+                            agent.presence === "offline" &&
+                              "text-muted-foreground",
+                          )}
+                        >
+                          {agent.name}
+                        </span>
+                        <PresenceDot member={agent} />
+                      </SidebarMenuButton>
+                    </ContextMenuTrigger>
+                    <ContextMenuContent className="w-52">
+                      <ContextMenuItem
+                        onSelect={() => setComposerInsert(`@${agent.name} `)}
+                      >
+                        <AtSignIcon className="size-4" /> Mention
+                      </ContextMenuItem>
+                      <ContextMenuItem
+                        onSelect={() =>
+                          void navigator.clipboard.writeText(agent.name)
+                        }
+                      >
+                        <CopyIcon className="size-4" /> Copy name
+                      </ContextMenuItem>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem disabled variant="destructive">
+                        <UnplugIcon className="size-4" /> Disconnect agent
+                      </ContextMenuItem>
+                    </ContextMenuContent>
+                  </ContextMenu>
                 </SidebarMenuItem>
               ))}
             </SidebarMenu>
@@ -94,11 +152,29 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
             <SidebarMenu>
               {humans.map((human) => (
                 <SidebarMenuItem key={human.id}>
-                  <SidebarMenuButton className="h-9">
-                    <MemberAvatar member={human} className="size-6" />
-                    <span className="flex-1 truncate">{human.name}</span>
-                    <PresenceDot member={human} />
-                  </SidebarMenuButton>
+                  <ContextMenu>
+                    <ContextMenuTrigger asChild>
+                      <SidebarMenuButton className="h-9">
+                        <MemberAvatar member={human} className="size-6" />
+                        <span className="flex-1 truncate">{human.name}</span>
+                        <PresenceDot member={human} />
+                      </SidebarMenuButton>
+                    </ContextMenuTrigger>
+                    <ContextMenuContent className="w-52">
+                      <ContextMenuItem
+                        onSelect={() => setComposerInsert(`@${human.name} `)}
+                      >
+                        <AtSignIcon className="size-4" /> Mention
+                      </ContextMenuItem>
+                      <ContextMenuItem
+                        onSelect={() =>
+                          void navigator.clipboard.writeText(human.name)
+                        }
+                      >
+                        <CopyIcon className="size-4" /> Copy name
+                      </ContextMenuItem>
+                    </ContextMenuContent>
+                  </ContextMenu>
                 </SidebarMenuItem>
               ))}
             </SidebarMenu>

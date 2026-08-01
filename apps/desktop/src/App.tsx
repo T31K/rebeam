@@ -16,6 +16,13 @@ export default function App() {
   }, [init]);
 
   useEffect(() => {
+    // native webview context menu never shows; app menus own right-click
+    const onContextMenu = (e: MouseEvent) => e.preventDefault();
+    window.addEventListener("contextmenu", onContextMenu);
+    return () => window.removeEventListener("contextmenu", onContextMenu);
+  }, []);
+
+  useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (!e.metaKey || e.key < "1" || e.key > "9") return;
       const { channels, selectChannel } = useChat.getState();

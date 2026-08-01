@@ -8,6 +8,14 @@ import {
   MessageScrollerProvider,
   MessageScrollerViewport,
 } from "@/components/ui/message-scroller";
+import { CopyIcon, AtSignIcon, CornerUpLeftIcon } from "lucide-react";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import { MemberAvatar } from "@/components/member-avatar";
 import { ApprovalCard } from "@/components/chat/approval-card";
 import {
@@ -110,16 +118,19 @@ function MessageRow({
   members: Member[];
   continuation: boolean;
 }) {
+  const setComposerInsert = useChat((s) => s.setComposerInsert);
   const author = memberById(members, message.authorId);
   if (!author) return null;
 
   return (
-    <div
-      className={cn(
-        "group flex gap-3 rounded-md px-2 py-0.5 hover:bg-muted/30",
-        continuation ? "mt-0" : "mt-3",
-      )}
-    >
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div
+          className={cn(
+            "group flex gap-3 rounded-md px-2 py-0.5 hover:bg-muted/30",
+            continuation ? "mt-0" : "mt-3",
+          )}
+        >
       <div className="w-7 shrink-0 pt-0.5">
         {!continuation && <MemberAvatar member={author} />}
       </div>
@@ -153,7 +164,28 @@ function MessageRow({
             {renderText(message.text, members)}
           </p>
         )}
-      </div>
-    </div>
+        </div>
+        </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent className="w-52">
+        <ContextMenuItem onSelect={() => setComposerInsert(`@${author.name} `)}>
+          <CornerUpLeftIcon className="size-4" /> Reply to {author.name}
+        </ContextMenuItem>
+        <ContextMenuItem onSelect={() => setComposerInsert(`@${author.name} `)}>
+          <AtSignIcon className="size-4" /> Mention {author.name}
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem
+          onSelect={() => void navigator.clipboard.writeText(message.text)}
+        >
+          <CopyIcon className="size-4" /> Copy text
+        </ContextMenuItem>
+        <ContextMenuItem
+          onSelect={() => void navigator.clipboard.writeText(message.id)}
+        >
+          <CopyIcon className="size-4" /> Copy message ID
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
