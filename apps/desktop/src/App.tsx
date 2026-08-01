@@ -51,6 +51,12 @@ function Shortcuts() {
         e.preventDefault();
         const { rightSidebarOpen, setRightSidebarOpen } = useChat.getState();
         setRightSidebarOpen(!rightSidebarOpen);
+        return;
+      }
+      if (e.key === "i") {
+        e.preventDefault();
+        const { activityOpen, setActivityOpen } = useChat.getState();
+        setActivityOpen(!activityOpen);
       }
     };
     window.addEventListener("keydown", onKeyDown);

@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { ActivitySheet } from "@/components/activity-sheet";
 import { useChat } from "@/lib/use-chat";
 
@@ -20,8 +19,7 @@ function Hint({ keys, label }: { keys: string; label: string }) {
 }
 
 export function StatusBar() {
-  const { channels, activeChannelId } = useChat();
-  const [activityOpen, setActivityOpen] = useState(false);
+  const { channels, activeChannelId, activityOpen, setActivityOpen } = useChat();
   const idx = channels.findIndex((c) => c.id === activeChannelId);
 
   return (

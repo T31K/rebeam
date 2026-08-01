@@ -13,6 +13,7 @@ interface ChatState {
   caddyOpen: boolean;
   prefsOpen: boolean;
   rightSidebarOpen: boolean;
+  activityOpen: boolean;
   /** text the command palette wants inserted into the composer */
   composerInsert: string | null;
   /** agents currently composing, per channel */
@@ -27,6 +28,7 @@ interface ChatState {
   setCaddyOpen(open: boolean): void;
   setPrefsOpen(open: boolean): void;
   setRightSidebarOpen(open: boolean): void;
+  setActivityOpen(open: boolean): void;
   setComposerInsert(text: string | null): void;
   setAgentTouch(key: string | null): void;
 }
@@ -40,6 +42,7 @@ export const useChat = create<ChatState>((set, get) => ({
   caddyOpen: false,
   prefsOpen: false,
   rightSidebarOpen: true,
+  activityOpen: false,
   composerInsert: null,
   working: [],
   agentTouch: null,
@@ -118,6 +121,10 @@ export const useChat = create<ChatState>((set, get) => ({
 
   setRightSidebarOpen(open) {
     set({ rightSidebarOpen: open });
+  },
+
+  setActivityOpen(open) {
+    set({ activityOpen: open });
   },
 
   setComposerInsert(text) {
