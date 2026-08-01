@@ -45,6 +45,12 @@ function Shortcuts() {
       if (e.key === "\\") {
         e.preventDefault();
         toggleSidebar();
+        return;
+      }
+      if (e.key === ".") {
+        e.preventDefault();
+        const { rightSidebarOpen, setRightSidebarOpen } = useChat.getState();
+        setRightSidebarOpen(!rightSidebarOpen);
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -56,6 +62,7 @@ function Shortcuts() {
 
 export default function App() {
   const init = useChat((s) => s.init);
+  const rightSidebarOpen = useChat((s) => s.rightSidebarOpen);
 
   useEffect(() => {
     void init();
@@ -76,7 +83,7 @@ export default function App() {
       <SidebarInset className="h-svh min-h-0 overflow-hidden pb-7 pt-11">
         <ChatView />
       </SidebarInset>
-      <SidebarRight className="pb-7 pt-11" />
+      {rightSidebarOpen && <SidebarRight className="pb-7 pt-11" />}
       <StatusBar />
       <CommandPalette />
       <CaddyPanel />

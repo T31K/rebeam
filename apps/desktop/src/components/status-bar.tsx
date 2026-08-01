@@ -31,7 +31,8 @@ export function StatusBar() {
         <Hint keys="⌘K" label="agent" />
         <Hint keys="⌘J" label="caddy" />
         <Hint keys="⌘1–9" label="channels" />
-        <Hint keys="⌘\" label="sidebar" />
+        <Hint keys="⌘\" label="left" />
+        <Hint keys="⌘." label="right" />
         <Hint keys="⌘," label="prefs" />
         {idx >= 0 && (
           <span className="text-foreground/60">
