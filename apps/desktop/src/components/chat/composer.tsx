@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { SendIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -7,10 +7,18 @@ import { useChat } from "@/lib/use-chat";
 import { cn } from "@/lib/utils";
 
 export function Composer() {
-  const { channels, activeChannelId, members, send } = useChat();
+  const { channels, activeChannelId, members, send, composerInsert, setComposerInsert } =
+    useChat();
   const [text, setText] = useState("");
   const [mentionSel, setMentionSel] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (composerInsert == null) return;
+    setText((t) => (t ? `${t.trimEnd()} ${composerInsert}` : composerInsert));
+    setComposerInsert(null);
+    textareaRef.current?.focus();
+  }, [composerInsert, setComposerInsert]);
 
   const channel = channels.find((c) => c.id === activeChannelId);
 

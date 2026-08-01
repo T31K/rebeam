@@ -5,6 +5,7 @@ import { ChatView } from "@/components/chat/chat-view";
 import { InviteModal } from "@/components/invite-modal";
 import { TitleBar } from "@/components/title-bar";
 import { StatusBar } from "@/components/status-bar";
+import { CommandPalette } from "@/components/command-palette";
 import { useChat } from "@/lib/use-chat";
 
 export default function App() {
@@ -36,6 +37,7 @@ export default function App() {
         <ChatView />
       </SidebarInset>
       <StatusBar />
+      <CommandPalette />
       <InviteModal />
     </SidebarProvider>
   );

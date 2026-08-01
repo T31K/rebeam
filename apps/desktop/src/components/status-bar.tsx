@@ -28,6 +28,7 @@ export function StatusBar() {
         connected · mock relay
       </span>
       <div className="ml-auto flex items-center gap-4">
+        <Hint keys="⌘K" label="palette" />
         <Hint keys="⌘1–9" label="channels" />
         <Hint keys="@" label="mention" />
         <Hint keys="↵" label="send" />

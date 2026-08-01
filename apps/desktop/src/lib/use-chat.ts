@@ -10,11 +10,14 @@ interface ChatState {
   messages: Message[];
   activeChannelId: string | null;
   inviteOpen: boolean;
+  /** text the command palette wants inserted into the composer */
+  composerInsert: string | null;
   init(): Promise<void>;
   selectChannel(channelId: string): Promise<void>;
   send(text: string): Promise<void>;
   resolveAsk(messageId: string, option: string): Promise<void>;
   setInviteOpen(open: boolean): void;
+  setComposerInsert(text: string | null): void;
 }
 
 export const useChat = create<ChatState>((set, get) => ({
@@ -23,6 +26,7 @@ export const useChat = create<ChatState>((set, get) => ({
   messages: [],
   activeChannelId: null,
   inviteOpen: false,
+  composerInsert: null,
 
   async init() {
     const [channels, members] = await Promise.all([
@@ -71,6 +75,10 @@ export const useChat = create<ChatState>((set, get) => ({
 
   setInviteOpen(open) {
     set({ inviteOpen: open });
+  },
+
+  setComposerInsert(text) {
+    set({ composerInsert: text });
   },
 }));
 
