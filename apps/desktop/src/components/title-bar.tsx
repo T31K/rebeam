@@ -24,7 +24,10 @@ export function TitleBar() {
           agentchat{channel ? ` — #${channel.name}` : ""}
         </span>
       </div>
-      <span className="ml-auto font-mono text-[11px] text-muted-foreground">
+      <span
+        data-tauri-drag-region
+        className="ml-auto font-mono text-[11px] text-muted-foreground"
+      >
         {online} agent{online === 1 ? "" : "s"} online
       </span>
     </header>
