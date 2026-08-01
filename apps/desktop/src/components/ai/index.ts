@@ -5,3 +5,5 @@ export { ApprovalFlow } from "./approval-flow";
 export { ToolChips } from "./tool-chips";
 export { TaskRows } from "./task-rows";
 export { CodeBlock } from "./code-block";
+export { InsightCards } from "./insight-cards";
+export { RecommendationCard } from "./recommendation-card";

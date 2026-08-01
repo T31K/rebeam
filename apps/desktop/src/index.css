@@ -25,6 +25,8 @@
     --color-blue: var(--blue);
     --color-green-tint: oklch(0.75 0.17 150 / 15%);
     --color-red-tint: oklch(0.68 0.19 25 / 15%);
+    --color-orange-tint: oklch(0.75 0.15 65 / 15%);
+    --color-accent-tint: oklch(0.68 0.14 250 / 15%);
     --color-accent-ink: oklch(0.75 0.1 250);
     --radius-control: 0.5rem;
     --radius-card: 0.875rem;
@@ -197,6 +199,67 @@
 a:hover .animated-underline,
 .animated-underline:hover {
     text-decoration-color: currentColor;
+}
+
+.insight-chart-stage {
+    cursor: crosshair;
+    touch-action: none;
+}
+
+.insight-chart-cursor {
+    position: absolute;
+    top: 8px;
+    bottom: 8px;
+    width: 1px;
+    background: var(--line-strong);
+    pointer-events: none;
+}
+
+.insight-chart-tooltip-anchor {
+    position: absolute;
+    top: 10px;
+    transform: translateX(-50%);
+    pointer-events: none;
+    z-index: 5;
+}
+
+.insight-chart-tooltip {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 130px;
+    padding: 6px 8px;
+    border-radius: 8px;
+    background: var(--surface);
+    box-shadow: var(--shadow-card);
+    font-size: 11px;
+    color: var(--ink);
+}
+
+.insight-chart-tooltip-time {
+    font-size: 10px;
+    color: var(--ink-3);
+}
+
+.insight-chart-tooltip-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    font-variant-numeric: tabular-nums;
+}
+
+.insight-chart-tooltip-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--ink-2);
+}
+
+.insight-chart-tooltip-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 9999px;
 }
 
 @keyframes fade-in {

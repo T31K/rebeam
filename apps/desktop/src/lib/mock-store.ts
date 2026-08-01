@@ -123,6 +123,16 @@ const demoSeeds: { authorId: string; text: string; demo?: string }[] = [
     demo: "approval-flow",
   },
   { authorId: "a_codex", text: "Deploying to staging…", demo: "loading" },
+  {
+    authorId: "a_kimi",
+    text: "While that ships — weekly numbers came in:",
+    demo: "insights",
+  },
+  {
+    authorId: "a_kimi",
+    text: "Based on those, one action item:",
+    demo: "recommendation",
+  },
 ];
 
 demoSeeds.forEach((seed, i) => {

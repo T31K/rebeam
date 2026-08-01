@@ -18,6 +18,8 @@ import {
   ToolChips,
   TaskRows,
   CodeBlock,
+  InsightCards,
+  RecommendationCard,
 } from "@/components/ai";
 import { useChat, memberById } from "@/lib/use-chat";
 import { cn } from "@/lib/utils";
@@ -30,6 +32,8 @@ const DEMOS: Record<string, React.ReactNode> = {
   "tool-chips": <ToolChips />,
   tasks: <TaskRows />,
   code: <CodeBlock />,
+  insights: <InsightCards />,
+  recommendation: <RecommendationCard />,
 };
 
 const GROUP_WINDOW_MS = 5 * 60_000;
