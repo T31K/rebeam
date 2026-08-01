@@ -292,7 +292,7 @@ export function SidebarLeft({
         {/* <NavMain items={data.navMain} /> */}
       </SidebarHeader>
       <SidebarContent>
-        <NavFavorites favorites={data.favorites} />
+        <NavFavorites />
         <NavWorkspaces workspaces={data.workspaces} />
         <NavSecondary items={data.navSecondary} className="mt-auto" />
       </SidebarContent>

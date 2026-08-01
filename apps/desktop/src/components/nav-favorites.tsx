@@ -14,30 +14,42 @@ import {
   SidebarMenuItem,
   useSidebar,
 } from "@/components/ui/sidebar"
-import { MoreHorizontalIcon, StarOffIcon, LinkIcon, ArrowUpRightIcon, Trash2Icon } from "lucide-react"
+import {
+  MoreHorizontalIcon,
+  LinkIcon,
+  BellOffIcon,
+  HashIcon,
+} from "lucide-react"
+import { useChat } from "@/lib/use-chat"
+import { cn } from "@/lib/utils"
 
-export function NavFavorites({
-  favorites,
-}: {
-  favorites: {
-    name: string
-    url: string
-    emoji: string
-  }[]
-}) {
+const CHANNEL_EMOJI: Record<string, string> = {
+  main: "💬",
+  dev: "🛠️",
+  research: "🔬",
+  showcase: "✨",
+}
+
+export function NavFavorites() {
   const { isMobile } = useSidebar()
+  const { channels, activeChannelId, selectChannel, agentTouch } = useChat()
 
   return (
     <SidebarGroup className="group-data-[collapsible=icon]:hidden">
-      <SidebarGroupLabel>Favorites</SidebarGroupLabel>
+      <SidebarGroupLabel>Chats</SidebarGroupLabel>
       <SidebarMenu>
-        {favorites.map((item) => (
-          <SidebarMenuItem key={item.name}>
-            <SidebarMenuButton asChild>
-              <a href={item.url} title={item.name}>
-                <span>{item.emoji}</span>
-                <span>{item.name}</span>
-              </a>
+        {channels.map((channel) => (
+          <SidebarMenuItem key={channel.id}>
+            <SidebarMenuButton
+              title={channel.topic ?? channel.name}
+              isActive={channel.id === activeChannelId}
+              onClick={() => void selectChannel(channel.id)}
+              className={cn(
+                agentTouch === `channel:${channel.id}` && "agent-touch",
+              )}
+            >
+              <span>{CHANNEL_EMOJI[channel.name] ?? "#"}</span>
+              <span>{channel.name}</span>
             </SidebarMenuButton>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -45,8 +57,7 @@ export function NavFavorites({
                   showOnHover
                   className="aria-expanded:bg-muted"
                 >
-                  <MoreHorizontalIcon
-                  />
+                  <MoreHorizontalIcon />
                   <span className="sr-only">More</span>
                 </SidebarMenuAction>
               </DropdownMenuTrigger>
@@ -55,23 +66,24 @@ export function NavFavorites({
                 side={isMobile ? "bottom" : "right"}
                 align={isMobile ? "end" : "start"}
               >
-                <DropdownMenuItem>
-                  <StarOffIcon className="text-muted-foreground" />
-                  <span>Remove from Favorites</span>
+                <DropdownMenuItem
+                  onSelect={() => void selectChannel(channel.id)}
+                >
+                  <HashIcon className="text-muted-foreground" />
+                  <span>Open channel</span>
                 </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem>
+                <DropdownMenuItem
+                  onSelect={() =>
+                    void navigator.clipboard.writeText(`#${channel.name}`)
+                  }
+                >
                   <LinkIcon className="text-muted-foreground" />
-                  <span>Copy Link</span>
-                </DropdownMenuItem>
-                <DropdownMenuItem>
-                  <ArrowUpRightIcon className="text-muted-foreground" />
-                  <span>Open in New Tab</span>
+                  <span>Copy name</span>
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem>
-                  <Trash2Icon className="text-muted-foreground" />
-                  <span>Delete</span>
+                <DropdownMenuItem disabled>
+                  <BellOffIcon className="text-muted-foreground" />
+                  <span>Mute channel</span>
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -79,8 +91,7 @@ export function NavFavorites({
         ))}
         <SidebarMenuItem>
           <SidebarMenuButton className="text-sidebar-foreground/70">
-            <MoreHorizontalIcon
-            />
+            <MoreHorizontalIcon />
             <span>More</span>
           </SidebarMenuButton>
         </SidebarMenuItem>
