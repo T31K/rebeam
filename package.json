@@ -1,0 +1,8 @@
+{
+  "name": "agentchat",
+  "private": true,
+  "scripts": {
+    "desktop": "pnpm --filter desktop tauri dev",
+    "dev": "pnpm --filter desktop dev"
+  }
+}
