@@ -7,6 +7,32 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
+    /* AI-primitive token bridge */
+    --color-ink: var(--ink);
+    --color-ink-2: var(--ink-2);
+    --color-ink-3: var(--ink-3);
+    --color-line: var(--line);
+    --color-line-strong: var(--line-strong);
+    --color-hover: var(--hover);
+    --color-hover-2: var(--hover-2);
+    --color-inset: var(--inset);
+    --color-surface: var(--surface);
+    --color-canvas: var(--canvas);
+    --color-field: var(--field);
+    --color-green: var(--green);
+    --color-red: var(--red);
+    --color-orange: var(--orange);
+    --color-blue: var(--blue);
+    --color-green-tint: oklch(0.75 0.17 150 / 15%);
+    --color-red-tint: oklch(0.68 0.19 25 / 15%);
+    --color-accent-ink: oklch(0.75 0.1 250);
+    --radius-control: 0.5rem;
+    --radius-card: 0.875rem;
+    --radius-chip: 0.4375rem;
+    --shadow-card: 0 0 0 1px oklch(1 0 0 / 7%), 0 8px 24px oklch(0 0 0 / 25%);
+    --shadow-btn: var(--shadow-btn);
+    --shadow-hairline: inset 0 0 0 1px oklch(1 0 0 / 7%);
+
     --font-heading: var(--font-sans);
     --font-sans: 'Inter Variable', sans-serif;
     --font-mono: 'Geist Mono Variable', ui-monospace, monospace;
@@ -118,6 +144,94 @@
     --sidebar-accent-foreground: oklch(0.93 0.004 264);
     --sidebar-border: oklch(1 0 0 / 7%);
     --sidebar-ring: oklch(0.556 0 0);
+}
+
+:root {
+    --ink: var(--foreground);
+    --ink-2: color-mix(in oklab, var(--foreground) 80%, var(--muted-foreground));
+    --ink-3: var(--muted-foreground);
+    --line: var(--border);
+    --line-strong: oklch(1 0 0 / 16%);
+    --hover: oklch(1 0 0 / 8%);
+    --hover-2: oklch(1 0 0 / 5%);
+    --inset: oklch(0 0 0 / 20%);
+    --surface: var(--card);
+    --canvas: var(--background);
+    --field: var(--input);
+    --green: oklch(0.75 0.17 150);
+    --red: oklch(0.68 0.19 25);
+    --orange: oklch(0.75 0.15 65);
+    --blue: oklch(0.68 0.14 250);
+    --shadow-btn: 0 0 0 1px oklch(1 0 0 / 9%), 0 1px 2px oklch(0 0 0 / 30%);
+}
+
+.primitive-card-pad {
+    padding: 12px;
+}
+
+.primitive-card-bar {
+    padding: 6px 8px 6px 12px;
+}
+
+.primitive-card-footer {
+    padding: 8px 12px;
+    border-top: 1px solid var(--line);
+}
+
+.primitive-icon-button {
+    display: flex;
+    width: 24px;
+    height: 24px;
+    align-items: center;
+    justify-content: center;
+    border-radius: 6px;
+}
+
+.animated-underline {
+    text-decoration: underline;
+    text-decoration-color: transparent;
+    text-underline-offset: 2px;
+    transition: text-decoration-color 150ms ease;
+}
+
+a:hover .animated-underline,
+.animated-underline:hover {
+    text-decoration-color: currentColor;
+}
+
+@keyframes fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@keyframes fade-up {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pop-in {
+    from { opacity: 0; transform: scale(0.85); }
+    to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+@keyframes pixel-on {
+    0%, 70%, 100% { opacity: 0.15; }
+    35% { opacity: 1; }
+}
+
+@keyframes shimmer-text {
+    0% { background-position: 150% 0; }
+    100% { background-position: -50% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .pixel-cell, .pixel-shimmer {
+        animation: none !important;
+    }
 }
 
 /* keep the fixed sidebar between the custom title bar and status bar */

@@ -40,6 +40,7 @@ const channels: Channel[] = [
   { id: "c_main", name: "main", topic: "humans + agents, one room" },
   { id: "c_dev", name: "dev", topic: "shipping things" },
   { id: "c_research", name: "research", topic: "kimi's territory" },
+  { id: "c_showcase", name: "showcase", topic: "AI-native message primitives" },
 ];
 
 const seedMessages: Message[] = [
@@ -101,6 +102,28 @@ const seedMessages: Message[] = [
     createdAt: now - 30 * min,
   },
 ];
+
+const demoSeeds: { authorId: string; text: string; demo: string }[] = [
+  { authorId: "a_claude", text: "Working on it…", demo: "loading" },
+  { authorId: "a_claude", text: "", demo: "thinking" },
+  { authorId: "a_kimi", text: "", demo: "streaming" },
+  { authorId: "a_claude", text: "", demo: "tool-chips" },
+  { authorId: "a_claude", text: "", demo: "code" },
+  { authorId: "a_codex", text: "", demo: "tasks" },
+  { authorId: "a_claude", text: "", demo: "approval-flow" },
+];
+
+demoSeeds.forEach((seed, i) => {
+  seedMessages.push({
+    id: `m_demo_${i}`,
+    channelId: "c_showcase",
+    authorId: seed.authorId,
+    kind: "text",
+    text: seed.text,
+    demo: seed.demo,
+    createdAt: now - (demoSeeds.length - i) * 2 * min,
+  });
+});
 
 const agentReplies: Record<string, string[]> = {
   a_claude: [
@@ -191,7 +214,7 @@ export class MockStore implements Store {
     const idx = this.replyIdx[mentioned.id] ?? 0;
     this.replyIdx[mentioned.id] = idx + 1;
     const reply = replies[idx % replies.length];
-    if (reply) this.postAgentMessage(channelId, mentioned.id, reply, 900);
+    if (reply) this.postAgentMessage(channelId, mentioned.id, reply, 2600);
   }
 
   private postAgentMessage(
@@ -200,7 +223,14 @@ export class MockStore implements Store {
     text: string,
     delayMs: number,
   ) {
+    this.emit({ type: "working", channelId, memberId: authorId, working: true });
     setTimeout(() => {
+      this.emit({
+        type: "working",
+        channelId,
+        memberId: authorId,
+        working: false,
+      });
       const message: Message = {
         id: `m_${crypto.randomUUID().slice(0, 8)}`,
         channelId,

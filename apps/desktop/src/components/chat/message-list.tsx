@@ -10,8 +10,27 @@ import {
 } from "@/components/ui/message-scroller";
 import { MemberAvatar } from "@/components/member-avatar";
 import { ApprovalCard } from "@/components/chat/approval-card";
+import {
+  LoadingState,
+  ThinkingState,
+  StreamingText,
+  ApprovalFlow,
+  ToolChips,
+  TaskRows,
+  CodeBlock,
+} from "@/components/ai";
 import { useChat, memberById } from "@/lib/use-chat";
 import { cn } from "@/lib/utils";
+
+const DEMOS: Record<string, React.ReactNode> = {
+  loading: <LoadingState label="Churning" />,
+  thinking: <ThinkingState variant="Steps" />,
+  streaming: <StreamingText />,
+  "approval-flow": <ApprovalFlow />,
+  "tool-chips": <ToolChips />,
+  tasks: <TaskRows />,
+  code: <CodeBlock />,
+};
 
 const GROUP_WINDOW_MS = 5 * 60_000;
 
@@ -114,7 +133,16 @@ function MessageRow({
             </span>
           </div>
         )}
-        {message.kind === "ask" ? (
+        {message.demo && DEMOS[message.demo] ? (
+          <div className="mt-1">
+            {message.text && (
+              <p className="mb-1.5 text-sm leading-relaxed text-foreground/90">
+                {message.text}
+              </p>
+            )}
+            {DEMOS[message.demo]}
+          </div>
+        ) : message.kind === "ask" ? (
           <ApprovalCard message={message} />
         ) : (
           <p className="text-sm leading-relaxed text-foreground/90">

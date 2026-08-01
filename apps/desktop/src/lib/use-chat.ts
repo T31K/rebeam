@@ -12,6 +12,8 @@ interface ChatState {
   inviteOpen: boolean;
   /** text the command palette wants inserted into the composer */
   composerInsert: string | null;
+  /** agents currently composing, per channel */
+  working: { channelId: string; memberId: string }[];
   init(): Promise<void>;
   selectChannel(channelId: string): Promise<void>;
   send(text: string): Promise<void>;
@@ -27,6 +29,7 @@ export const useChat = create<ChatState>((set, get) => ({
   activeChannelId: null,
   inviteOpen: false,
   composerInsert: null,
+  working: [],
 
   async init() {
     const [channels, members] = await Promise.all([
@@ -44,6 +47,17 @@ export const useChat = create<ChatState>((set, get) => ({
           messages: get().messages.map((m) =>
             m.id === event.message.id ? { ...event.message } : m,
           ),
+        });
+      }
+      if (event.type === "working") {
+        const rest = get().working.filter(
+          (w) =>
+            !(w.channelId === event.channelId && w.memberId === event.memberId),
+        );
+        set({
+          working: event.working
+            ? [...rest, { channelId: event.channelId, memberId: event.memberId }]
+            : rest,
         });
       }
       if (event.type === "presence") {

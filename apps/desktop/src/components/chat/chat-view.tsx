@@ -2,7 +2,20 @@ import { HashIcon } from "lucide-react";
 import { Separator } from "@/components/ui/separator";
 import { MessageList } from "@/components/chat/message-list";
 import { Composer } from "@/components/chat/composer";
-import { useChat } from "@/lib/use-chat";
+import { LoadingState } from "@/components/ai";
+import { useChat, memberById } from "@/lib/use-chat";
+
+function WorkingIndicator() {
+  const { working, activeChannelId, members } = useChat();
+  const entry = working.find((w) => w.channelId === activeChannelId);
+  if (!entry) return null;
+  const member = memberById(members, entry.memberId);
+  return (
+    <div className="px-6 pb-1.5">
+      <LoadingState label={`${member?.name ?? "agent"} is working`} />
+    </div>
+  );
+}
 
 export function ChatView() {
   const { channels, activeChannelId } = useChat();
@@ -23,6 +36,7 @@ export function ChatView() {
         )}
       </header>
       <MessageList />
+      <WorkingIndicator />
       <Composer />
     </div>
   );

@@ -28,6 +28,8 @@ export interface Message {
   options?: string[];
   /** set once a human taps a button */
   resolvedOption?: string;
+  /** renders a named AI primitive instead of text (showcase/demo) */
+  demo?: string;
   createdAt: number;
 }
 
@@ -40,7 +42,8 @@ export interface Invite {
 export type StoreEvent =
   | { type: "message"; message: Message }
   | { type: "message.updated"; message: Message }
-  | { type: "presence"; memberId: string; presence: Presence };
+  | { type: "presence"; memberId: string; presence: Presence }
+  | { type: "working"; channelId: string; memberId: string; working: boolean };
 
 /**
  * The only surface the desktop app talks to. Phase 1 backs it with an
