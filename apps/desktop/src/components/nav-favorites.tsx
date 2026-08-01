@@ -7,6 +7,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import {
   SidebarGroup,
+  SidebarGroupAction,
   SidebarGroupLabel,
   SidebarMenu,
   SidebarMenuAction,
@@ -19,6 +20,7 @@ import {
   LinkIcon,
   BellOffIcon,
   HashIcon,
+  PlusIcon,
 } from "lucide-react"
 import { useChat } from "@/lib/use-chat"
 import { cn } from "@/lib/utils"
@@ -32,11 +34,15 @@ const CHANNEL_EMOJI: Record<string, string> = {
 
 export function NavFavorites() {
   const { isMobile } = useSidebar()
-  const { channels, activeChannelId, selectChannel, agentTouch } = useChat()
+  const { channels, activeChannelId, selectChannel, agentTouch, setInviteOpen } =
+    useChat()
 
   return (
     <SidebarGroup className="pt-0 group-data-[collapsible=icon]:hidden">
       <SidebarGroupLabel>Chats</SidebarGroupLabel>
+      <SidebarGroupAction title="New chat" onClick={() => setInviteOpen(true)}>
+        <PlusIcon />
+      </SidebarGroupAction>
       <SidebarMenu>
         {channels.map((channel) => (
           <SidebarMenuItem key={channel.id}>
