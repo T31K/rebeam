@@ -119,7 +119,7 @@ export function Composer() {
           className="max-h-40 min-h-10 flex-1 resize-none"
         />
         <Button size="icon" onClick={submit} disabled={!text.trim()}>
-          <SendIcon className="size-4" />
+          <SendIcon className="size-4 rotate-[30deg]" />
         </Button>
       </div>
     </div>
