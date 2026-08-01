@@ -4,7 +4,7 @@ import {
   SidebarProvider,
   useSidebar,
 } from "@/components/ui/sidebar";
-import { AppSidebar } from "@/components/app-sidebar";
+import { SidebarLeft } from "@/components/sidebar-left";
 import { MembersSidebar } from "@/components/members-sidebar";
 import { ChatView } from "@/components/chat/chat-view";
 import { InviteModal } from "@/components/invite-modal";
@@ -72,7 +72,7 @@ export default function App() {
     <SidebarProvider>
       <Shortcuts />
       <TitleBar />
-      <AppSidebar />
+      <SidebarLeft />
       <SidebarInset className="h-svh min-h-0 overflow-hidden pb-7 pt-11">
         <ChatView />
       </SidebarInset>
