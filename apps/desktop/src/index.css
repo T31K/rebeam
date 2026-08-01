@@ -347,5 +347,6 @@ a:hover .animated-underline,
     }
   html {
     @apply font-sans;
+    letter-spacing: -0.011em;
     }
 }
