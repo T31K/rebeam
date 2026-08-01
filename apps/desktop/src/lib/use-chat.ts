@@ -10,6 +10,8 @@ interface ChatState {
   messages: Message[];
   activeChannelId: string | null;
   inviteOpen: boolean;
+  caddyOpen: boolean;
+  prefsOpen: boolean;
   /** text the command palette wants inserted into the composer */
   composerInsert: string | null;
   /** agents currently composing, per channel */
@@ -19,6 +21,8 @@ interface ChatState {
   send(text: string): Promise<void>;
   resolveAsk(messageId: string, option: string): Promise<void>;
   setInviteOpen(open: boolean): void;
+  setCaddyOpen(open: boolean): void;
+  setPrefsOpen(open: boolean): void;
   setComposerInsert(text: string | null): void;
 }
 
@@ -28,6 +32,8 @@ export const useChat = create<ChatState>((set, get) => ({
   messages: [],
   activeChannelId: null,
   inviteOpen: false,
+  caddyOpen: false,
+  prefsOpen: false,
   composerInsert: null,
   working: [],
 
@@ -89,6 +95,14 @@ export const useChat = create<ChatState>((set, get) => ({
 
   setInviteOpen(open) {
     set({ inviteOpen: open });
+  },
+
+  setCaddyOpen(open) {
+    set({ caddyOpen: open });
+  },
+
+  setPrefsOpen(open) {
+    set({ prefsOpen: open });
   },
 
   setComposerInsert(text) {

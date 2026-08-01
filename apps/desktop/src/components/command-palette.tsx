@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
-import { HashIcon, PlusIcon, AtSignIcon } from "lucide-react";
+import { HashIcon, PlusIcon, AtSignIcon, SparklesIcon } from "lucide-react";
+import { mockBrain } from "@/lib/brain";
+import { execute } from "@/lib/commands";
 import {
   Command,
   CommandDialog,
@@ -16,8 +18,10 @@ import { useChat } from "@/lib/use-chat";
 
 export function CommandPalette() {
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
   const { channels, members, selectChannel, setInviteOpen, setComposerInsert } =
     useChat();
+  const plan = query.trim().length > 2 ? mockBrain.plan(query) : null;
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -38,9 +42,32 @@ export function CommandPalette() {
   return (
     <CommandDialog open={open} onOpenChange={setOpen}>
       <Command>
-      <CommandInput placeholder="Jump to a channel, mention someone, or run a command…" />
+      <CommandInput
+        value={query}
+        onValueChange={setQuery}
+        placeholder="Jump somewhere, or just say what you want done…"
+      />
       <CommandList>
         <CommandEmpty>Nothing matches.</CommandEmpty>
+        {plan && (
+          <CommandGroup heading="Agent">
+            <CommandItem
+              value={query}
+              onSelect={() => {
+                setOpen(false);
+                setQuery("");
+                void (async () => {
+                  for (const call of plan) await execute(call);
+                })();
+              }}
+            >
+              <SparklesIcon className="size-4 text-violet-400" />
+              <span className="truncate">
+                {plan.map((c) => c.label).join(" → ")}
+              </span>
+            </CommandItem>
+          </CommandGroup>
+        )}
         <CommandGroup heading="Channels">
           {channels.map((channel, i) => (
             <CommandItem
