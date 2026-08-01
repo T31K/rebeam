@@ -49,7 +49,7 @@ export function NavFavorites() {
               )}
             >
               <span>{CHANNEL_EMOJI[channel.name] ?? "#"}</span>
-              <span>{channel.name}</span>
+              <span className="capitalize">{channel.name}</span>
             </SidebarMenuButton>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>

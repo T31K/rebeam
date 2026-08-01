@@ -24,7 +24,9 @@ export function ChatView() {
     <div className="flex h-full min-h-0 flex-col">
       <header className="flex h-10 shrink-0 items-center gap-2 border-b px-4">
         <HashIcon className="size-4 text-muted-foreground" />
-        <span className="text-sm font-semibold">{channel?.name ?? "…"}</span>
+        <span className="text-sm font-semibold capitalize">
+          {channel?.name ?? "…"}
+        </span>
         {channel?.topic && (
           <span className="ml-2 truncate text-xs text-muted-foreground">
             {channel.topic}
