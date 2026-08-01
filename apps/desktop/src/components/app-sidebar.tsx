@@ -1,5 +1,5 @@
 import * as React from "react";
-import { HashIcon, PlusIcon, ZapIcon } from "lucide-react";
+import { HashIcon, PlusIcon } from "lucide-react";
 
 import {
   Sidebar,
@@ -25,25 +25,11 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   const agents = members.filter((m) => m.type === "agent");
 
   return (
-    <Sidebar variant="inset" {...props}>
-      <SidebarHeader>
-        <SidebarMenu>
-          <SidebarMenuItem>
-            <SidebarMenuButton size="lg" className="pointer-events-none">
-              <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
-                <ZapIcon className="size-4" />
-              </div>
-              <div className="grid flex-1 text-left text-sm leading-tight">
-                <span className="truncate font-semibold tracking-tight">
-                  agentchat
-                </span>
-                <span className="truncate text-xs text-muted-foreground">
-                  t31k's workspace
-                </span>
-              </div>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        </SidebarMenu>
+    <Sidebar {...props}>
+      <SidebarHeader className="px-4 pb-0 pt-3">
+        <span className="text-sm font-semibold tracking-tight">
+          t31k's workspace
+        </span>
       </SidebarHeader>
 
       <SidebarContent>

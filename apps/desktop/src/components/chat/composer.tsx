@@ -102,10 +102,6 @@ export function Composer() {
           <SendIcon className="size-4" />
         </Button>
       </div>
-      <p className="mt-1.5 text-[11px] text-muted-foreground">
-        <span className="font-medium">@mention</span> an agent to hand it work —
-        Enter to send, Shift+Enter for a new line
-      </p>
     </div>
   );
 }
