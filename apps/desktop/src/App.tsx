@@ -92,7 +92,7 @@ function ResizeHandle({
 }) {
   return (
     <div
-      className="fixed bottom-7 top-10 z-40 w-1.5 cursor-col-resize transition-colors hover:bg-primary/25 active:bg-primary/40"
+      className="fixed bottom-7 top-10 z-40 w-1.5 cursor-col-resize"
       style={side === "left" ? { left: offset - 3 } : { right: offset - 3 }}
       onPointerDown={(e) => {
         e.preventDefault();
