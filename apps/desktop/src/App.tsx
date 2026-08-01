@@ -83,7 +83,14 @@ export default function App() {
       <SidebarInset className="h-svh min-h-0 overflow-hidden pb-7 pt-11">
         <ChatView />
       </SidebarInset>
-      {rightSidebarOpen && <SidebarRight className="pb-7 pt-11" />}
+      <div
+        className={
+          "shrink-0 overflow-hidden transition-[width] duration-200 ease-linear " +
+          (rightSidebarOpen ? "w-(--sidebar-width)" : "w-0")
+        }
+      >
+        <SidebarRight className="pb-7 pt-11" />
+      </div>
       <StatusBar />
       <CommandPalette />
       <CaddyPanel />
