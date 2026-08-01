@@ -348,7 +348,7 @@ a:hover .animated-underline,
   html {
     @apply font-sans;
     letter-spacing: -0.011em;
-    /* global type scale: 16px -> 12.8px base */
-    font-size: 80%;
+    /* global type scale: 16px -> 13.6px base */
+    font-size: 85%;
     }
 }
