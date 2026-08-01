@@ -93,6 +93,11 @@ export function CaddyPanel() {
       }
     }
     updateLast({ text: "Done." });
+    // get out of the way — the result is in the app behind us
+    setTimeout(() => {
+      setCaddyOpen(false);
+      setTurns([]);
+    }, 650);
   };
 
   return (

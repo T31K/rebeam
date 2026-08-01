@@ -38,6 +38,8 @@ export const useChat = create<ChatState>((set, get) => ({
   working: [],
 
   async init() {
+    // StrictMode double-invokes effects; never subscribe twice
+    if (get().channels.length) return;
     const [channels, members] = await Promise.all([
       store.listChannels(),
       store.listMembers(),
@@ -46,7 +48,9 @@ export const useChat = create<ChatState>((set, get) => ({
     store.subscribe((event) => {
       const { activeChannelId, messages } = get();
       if (event.type === "message" && event.message.channelId === activeChannelId) {
-        set({ messages: [...messages, event.message] });
+        if (!messages.some((m) => m.id === event.message.id)) {
+          set({ messages: [...messages, event.message] });
+        }
       }
       if (event.type === "message.updated") {
         set({
