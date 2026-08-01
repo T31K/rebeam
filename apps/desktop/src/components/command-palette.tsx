@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { HashIcon, PlusIcon, AtSignIcon, SparklesIcon } from "lucide-react";
 import { mockBrain } from "@/lib/brain";
-import { execute } from "@/lib/commands";
+import { runPlan } from "@/lib/commands";
 import {
   Command,
   CommandDialog,
@@ -56,9 +56,7 @@ export function CommandPalette() {
               onSelect={() => {
                 setOpen(false);
                 setQuery("");
-                void (async () => {
-                  for (const call of plan) await execute(call);
-                })();
+                void runPlan(plan).catch(() => {});
               }}
             >
               <SparklesIcon className="size-4 text-violet-400" />

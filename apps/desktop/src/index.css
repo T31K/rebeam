@@ -201,6 +201,14 @@ a:hover .animated-underline,
     text-decoration-color: currentColor;
 }
 
+/* control the in-app agent is currently "pressing" */
+.agent-touch {
+    background: oklch(0.62 0.19 300 / 16%) !important;
+    box-shadow: 0 0 0 1.5px oklch(0.7 0.17 300 / 55%);
+    border-radius: 8px;
+    transition: background 150ms ease, box-shadow 150ms ease;
+}
+
 .insight-chart-stage {
     cursor: crosshair;
     touch-action: none;

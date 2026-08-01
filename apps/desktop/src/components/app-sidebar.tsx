@@ -34,6 +34,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
     selectChannel,
     setInviteOpen,
     setComposerInsert,
+    agentTouch,
   } = useChat();
   const humans = members.filter((m) => m.type === "human");
   const agents = members.filter((m) => m.type === "agent");
@@ -58,6 +59,9 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
                       <SidebarMenuButton
                         isActive={channel.id === activeChannelId}
                         onClick={() => selectChannel(channel.id)}
+                        className={cn(
+                          agentTouch === `channel:${channel.id}` && "agent-touch",
+                        )}
                       >
                         <HashIcon className="size-3.5 text-muted-foreground" />
                         <span>{channel.name}</span>
@@ -101,7 +105,12 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
                 <SidebarMenuItem key={agent.id}>
                   <ContextMenu>
                     <ContextMenuTrigger asChild>
-                      <SidebarMenuButton className="h-9">
+                      <SidebarMenuButton
+                        className={cn(
+                          "h-9",
+                          agentTouch === `member:${agent.id}` && "agent-touch",
+                        )}
+                      >
                         <MemberAvatar member={agent} className="size-6" />
                         <span
                           className={cn(
@@ -185,7 +194,10 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
       <SidebarFooter>
         <SidebarMenu>
           <SidebarMenuItem>
-            <SidebarMenuButton onClick={() => setInviteOpen(true)}>
+            <SidebarMenuButton
+              onClick={() => setInviteOpen(true)}
+              className={cn(agentTouch === "invite" && "agent-touch")}
+            >
               <PlusIcon className="size-4" />
               <span>Invite people or agents</span>
             </SidebarMenuButton>

@@ -16,6 +16,8 @@ interface ChatState {
   composerInsert: string | null;
   /** agents currently composing, per channel */
   working: { channelId: string; memberId: string }[];
+  /** UI control the in-app agent is currently "pressing" */
+  agentTouch: string | null;
   init(): Promise<void>;
   selectChannel(channelId: string): Promise<void>;
   send(text: string): Promise<void>;
@@ -24,6 +26,7 @@ interface ChatState {
   setCaddyOpen(open: boolean): void;
   setPrefsOpen(open: boolean): void;
   setComposerInsert(text: string | null): void;
+  setAgentTouch(key: string | null): void;
 }
 
 export const useChat = create<ChatState>((set, get) => ({
@@ -36,6 +39,7 @@ export const useChat = create<ChatState>((set, get) => ({
   prefsOpen: false,
   composerInsert: null,
   working: [],
+  agentTouch: null,
 
   async init() {
     // StrictMode double-invokes effects; never subscribe twice
@@ -111,6 +115,10 @@ export const useChat = create<ChatState>((set, get) => ({
 
   setComposerInsert(text) {
     set({ composerInsert: text });
+  },
+
+  setAgentTouch(key) {
+    set({ agentTouch: key });
   },
 }));
 

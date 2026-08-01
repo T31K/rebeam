@@ -3,7 +3,7 @@ import { CheckIcon, SparklesIcon, XIcon } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { mockBrain } from "@/lib/brain";
-import { execute, type CommandCall } from "@/lib/commands";
+import { runPlan, type CommandCall } from "@/lib/commands";
 import { useChat } from "@/lib/use-chat";
 import { cn } from "@/lib/utils";
 
@@ -71,26 +71,15 @@ export function CaddyPanel() {
       },
     ]);
 
-    for (let i = 0; i < plan.length; i++) {
-      updateLast({
-        steps: plan.map((_, j) =>
-          j < i ? "done" : j === i ? "running" : "pending",
-        ),
+    const states: StepState[] = plan.map(() => "pending");
+    try {
+      await runPlan(plan, (i, phase, err) => {
+        states[i] = phase;
+        updateLast({ steps: [...states] });
+        if (err) updateLast({ text: err });
       });
-      try {
-        await execute(plan[i]);
-        updateLast({
-          steps: plan.map((_, j) => (j <= i ? "done" : "pending")),
-        });
-      } catch (e) {
-        updateLast({
-          steps: plan.map((_, j) =>
-            j < i ? "done" : j === i ? "error" : "pending",
-          ),
-          text: e instanceof Error ? e.message : String(e),
-        });
-        return;
-      }
+    } catch {
+      return;
     }
     updateLast({ text: "Done." });
     // get out of the way — the result is in the app behind us

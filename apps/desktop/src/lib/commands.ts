@@ -107,3 +107,54 @@ export async function execute(call: CommandCall): Promise<string> {
   if (!def) throw new Error(`Unknown command: ${call.id}`);
   return def.run(call.args);
 }
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** which UI control this call "presses", for the touch highlight */
+function touchFor(call: CommandCall): string | null {
+  switch (call.id) {
+    case "channel.open": {
+      const c = resolveChannel(call.args.channel);
+      return c ? `channel:${c.id}` : null;
+    }
+    case "message.send":
+      return "composer";
+    case "member.mention": {
+      const m = resolveMember(call.args.name);
+      return m ? `member:${m.id}` : null;
+    }
+    case "workspace.invite":
+      return "invite";
+    default:
+      return null;
+  }
+}
+
+export type StepPhase = "running" | "done" | "error";
+
+/**
+ * Run a plan like an agent using the app: highlight the control,
+ * beat, press, beat. All agent surfaces (⌘K, caddy) share this.
+ */
+export async function runPlan(
+  plan: CommandCall[],
+  onStep?: (index: number, phase: StepPhase, error?: string) => void,
+): Promise<void> {
+  const { setAgentTouch } = useChat.getState();
+  for (let i = 0; i < plan.length; i++) {
+    onStep?.(i, "running");
+    setAgentTouch(touchFor(plan[i]));
+    await sleep(520);
+    try {
+      await execute(plan[i]);
+      onStep?.(i, "done");
+    } catch (e) {
+      setAgentTouch(null);
+      onStep?.(i, "error", e instanceof Error ? e.message : String(e));
+      throw e;
+    }
+    await sleep(220);
+    setAgentTouch(null);
+    await sleep(120);
+  }
+}

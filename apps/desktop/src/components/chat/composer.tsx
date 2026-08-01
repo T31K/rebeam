@@ -7,8 +7,15 @@ import { useChat } from "@/lib/use-chat";
 import { cn } from "@/lib/utils";
 
 export function Composer() {
-  const { channels, activeChannelId, members, send, composerInsert, setComposerInsert } =
-    useChat();
+  const {
+    channels,
+    activeChannelId,
+    members,
+    send,
+    composerInsert,
+    setComposerInsert,
+    agentTouch,
+  } = useChat();
   const [text, setText] = useState("");
   const [mentionSel, setMentionSel] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -96,7 +103,12 @@ export function Composer() {
           ))}
         </div>
       )}
-      <div className="flex items-end gap-2">
+      <div
+        className={cn(
+          "flex items-end gap-2",
+          agentTouch === "composer" && "agent-touch",
+        )}
+      >
         <Textarea
           ref={textareaRef}
           value={text}
