@@ -5,7 +5,7 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { SidebarLeft } from "@/components/sidebar-left";
-import { MembersSidebar } from "@/components/members-sidebar";
+import { SidebarRight } from "@/components/sidebar-right";
 import { ChatView } from "@/components/chat/chat-view";
 import { InviteModal } from "@/components/invite-modal";
 import { PrefsModal } from "@/components/prefs-modal";
@@ -76,7 +76,7 @@ export default function App() {
       <SidebarInset className="h-svh min-h-0 overflow-hidden pb-7 pt-11">
         <ChatView />
       </SidebarInset>
-      <MembersSidebar />
+      <SidebarRight className="pb-7 pt-11" />
       <StatusBar />
       <CommandPalette />
       <CaddyPanel />
