@@ -332,10 +332,10 @@ a:hover .animated-underline,
     }
 }
 
-/* keep the fixed sidebar above the status bar */
+/* keep the fixed sidebar between the custom title bar and status bar */
 [data-slot="sidebar-container"] {
-    top: 0;
-    height: calc(100svh - 1.75rem);
+    top: 2.75rem;
+    height: calc(100svh - 2.75rem - 1.75rem);
 }
 
 @layer base {
