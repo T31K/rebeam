@@ -40,7 +40,7 @@ export function TeamSwitcher({
                 {activeTeam.logo}
               </div>
               <span className="truncate font-medium">{activeTeam.name}</span>
-              <ChevronDownIcon className="opacity-50" />
+              <ChevronDownIcon className="ml-auto opacity-50" />
             </SidebarMenuButton>
           </DropdownMenuTrigger>
           <DropdownMenuContent
