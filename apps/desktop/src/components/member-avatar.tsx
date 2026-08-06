@@ -1,12 +1,38 @@
 import type { Member } from "@agentchat/shared";
-import { BotIcon } from "lucide-react";
+import { DitherAvatar } from "@/components/dither-kit/avatar";
+import { fnv1a, hueFill, xorshift32 } from "@/components/dither-kit/pixel";
+import { type Rgb } from "@/components/dither-kit/palette";
 import { cn } from "@/lib/utils";
 
-const agentColors: Record<string, string> = {
-  a_claude: "bg-orange-500/15 text-orange-400",
-  a_kimi: "bg-sky-500/15 text-sky-400",
-  a_codex: "bg-emerald-500/15 text-emerald-400",
-};
+/**
+ * Mirror DitherAvatar's deterministic hue draw (32 pattern bits +
+ * mirror axis are consumed first) so the frame matches the pixels.
+ */
+export function avatarFill(name: string): Rgb {
+  const rand = xorshift32(fnv1a(name));
+  for (let i = 0; i < 33; i++) rand();
+  return hueFill(Math.floor(rand() * 180) * 2);
+}
+
+export function AvatarFrame({
+  name,
+  className,
+}: {
+  name: string;
+  className?: string;
+}) {
+  return (
+    <span
+      className={cn(
+        "inline-block size-7 shrink-0 overflow-hidden rounded-none border-[0.5px] border-foreground/25 bg-foreground/[0.06] p-px",
+        className,
+      )}
+      style={{ filter: "grayscale(1) brightness(1.15)" }}
+    >
+      <DitherAvatar name={name} className="size-full" />
+    </span>
+  );
+}
 
 export function MemberAvatar({
   member,
@@ -15,29 +41,7 @@ export function MemberAvatar({
   member: Member;
   className?: string;
 }) {
-  if (member.type === "agent") {
-    return (
-      <div
-        className={cn(
-          "flex size-7 shrink-0 items-center justify-center rounded-md",
-          agentColors[member.id] ?? "bg-violet-500/15 text-violet-400",
-          className,
-        )}
-      >
-        <BotIcon className="size-4" />
-      </div>
-    );
-  }
-  return (
-    <div
-      className={cn(
-        "flex size-7 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-semibold uppercase text-primary",
-        className,
-      )}
-    >
-      {member.name.slice(0, 2)}
-    </div>
-  );
+  return <AvatarFrame name={member.name} className={className} />;
 }
 
 export function PresenceDot({ member }: { member: Member }) {

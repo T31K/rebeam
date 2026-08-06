@@ -115,16 +115,42 @@ function Dot({ tone }: { tone: string }) {
 
 const TONES = ["bg-blue", "bg-orange", "bg-green"];
 
-export function ThinkingState({ variant = "Steps" }: { variant?: string }) {
+/** Real telemetry, replacing the scripted demo timeline. */
+export type LiveTrace = {
+  working: boolean;
+  /** header while working */
+  label: string;
+  /** header once settled — "Thought for 4 seconds" */
+  doneLabel: string;
+  rows: Row[];
+};
+
+export function ThinkingState({
+  variant = "Steps",
+  live,
+}: {
+  variant?: string;
+  live?: LiveTrace;
+}) {
   const stage = useSequence(STAGES);
   const [manualExpanded, setManualExpanded] = useState<boolean | null>(null);
   const [selectedTool, setSelectedTool] = useState<string | null>(null);
-  const v = VARIANTS[variant] ?? VARIANTS.Steps;
-  const autoExpanded = stage >= 1 && stage < 4;
+
+  // With `live` the component renders real events; without it, the scripted
+  // showcase timeline. Same visuals either way.
+  const v = live
+    ? { active: live.label, done: live.doneLabel, rows: live.rows, query: undefined }
+    : (VARIANTS[variant] ?? VARIANTS.Steps);
+  const autoExpanded = live ? true : stage >= 1 && stage < 4;
   const expanded = manualExpanded ?? autoExpanded;
-  const working = stage < 3;
-  const visible =
-    stage < 2 ? 0 : stage === 2 ? Math.min(2, v.rows.length) : v.rows.length;
+  const working = live ? live.working : stage < 3;
+  const visible = live
+    ? v.rows.length
+    : stage < 2
+      ? 0
+      : stage === 2
+        ? Math.min(2, v.rows.length)
+        : v.rows.length;
   const traceRef = useRef<HTMLDivElement>(null);
   const [lineHeight, setLineHeight] = useState(0);
   useLayoutEffect(() => {

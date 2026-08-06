@@ -19,7 +19,7 @@ export function TitleBar() {
         className="pointer-events-none absolute inset-x-0 flex justify-center"
       >
         <span className="font-mono text-[11px] tracking-tight text-muted-foreground">
-          agentchat{channel ? ` — #${channel.name}` : ""}
+          agentchat{channel ? ` — ${channel.name}` : ""}
         </span>
       </div>
       <span

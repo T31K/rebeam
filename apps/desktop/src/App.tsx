@@ -9,6 +9,7 @@ import { SidebarLeft } from "@/components/sidebar-left";
 import { SidebarRight } from "@/components/sidebar-right";
 import { ChatView } from "@/components/chat/chat-view";
 import { InviteModal } from "@/components/invite-modal";
+import { NewChatModal } from "@/components/new-chat-modal";
 import { PrefsModal } from "@/components/prefs-modal";
 import { CaddyPanel } from "@/components/caddy-panel";
 import { TitleBar } from "@/components/title-bar";
@@ -22,6 +23,15 @@ function Shortcuts() {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (!e.metaKey && !e.ctrlKey) return;
+      if (
+        import.meta.env.DEV &&
+        e.shiftKey &&
+        e.key.toLowerCase() === "r"
+      ) {
+        e.preventDefault();
+        window.location.reload();
+        return;
+      }
       if (e.key >= "1" && e.key <= "9") {
         const { channels, selectChannel } = useChat.getState();
         const channel = channels[Number(e.key) - 1];
@@ -46,12 +56,6 @@ function Shortcuts() {
       if (e.key === "\\") {
         e.preventDefault();
         toggleSidebar();
-        return;
-      }
-      if (e.key === ".") {
-        e.preventDefault();
-        const { rightSidebarOpen, setRightSidebarOpen } = useChat.getState();
-        setRightSidebarOpen(!rightSidebarOpen);
         return;
       }
       if (e.key === "i") {
@@ -92,7 +96,7 @@ function ResizeHandle({
 }) {
   return (
     <div
-      className="fixed bottom-7 top-9.5 z-40 w-1.5 cursor-col-resize"
+      className="fixed bottom-8 top-9.5 z-40 w-1.5 cursor-col-resize"
       style={side === "left" ? { left: offset - 3 } : { right: offset - 3 }}
       onPointerDown={(e) => {
         e.preventDefault();
@@ -133,12 +137,16 @@ function LeftResizeHandle({
 
 export default function App() {
   const init = useChat((s) => s.init);
+  const authed = useChat((s) => s.authed);
+  const authReady = useChat((s) => s.authReady);
+  const initAuth = useChat((s) => s.initAuth);
+  const refreshMachines = useChat((s) => s.refreshMachines);
   const rightSidebarOpen = useChat((s) => s.rightSidebarOpen);
   const [leftWidth, setLeftWidth] = useState(() =>
     storedWidth("agentchat.leftWidth", 256),
   );
   const [rightWidth, setRightWidth] = useState(() =>
-    storedWidth("agentchat.rightWidth", 256),
+    storedWidth("agentchat.rightWidth", 288),
   );
   const [resizing, setResizing] = useState(false);
   const saveTimer = useRef<number | undefined>(undefined);
@@ -162,8 +170,19 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    void init();
-  }, [init]);
+    void initAuth();
+  }, [initAuth]);
+
+  useEffect(() => {
+    if (authReady && authed) void init();
+  }, [authReady, authed, init]);
+
+  useEffect(() => {
+    if (!authReady || !authed) return;
+    void refreshMachines();
+    const timer = window.setInterval(() => void refreshMachines(), 5_000);
+    return () => window.clearInterval(timer);
+  }, [authReady, authed, refreshMachines]);
 
   useEffect(() => {
     // native webview context menu never shows; app menus own right-click
@@ -171,6 +190,8 @@ export default function App() {
     window.addEventListener("contextmenu", onContextMenu);
     return () => window.removeEventListener("contextmenu", onContextMenu);
   }, []);
+
+  if (!authReady || !authed) return <div className="h-svh bg-background" />;
 
   return (
     <SidebarProvider
@@ -184,7 +205,7 @@ export default function App() {
         onDrag={(x) => setLeftWidth(clampSidebar(x))}
         onDragging={setResizing}
       />
-      <SidebarInset className="h-svh min-h-0 overflow-hidden pb-7 pt-9.5">
+      <SidebarInset className="h-svh min-h-0 overflow-hidden pb-8 pt-9.5">
         <ChatView />
       </SidebarInset>
       <div
@@ -195,7 +216,7 @@ export default function App() {
         style={{ width: rightSidebarOpen ? rightWidth : 0 }}
       >
         <SidebarRight
-          className="pb-7 pt-9.5"
+          className="pb-8 pt-9.5"
           style={{ "--sidebar-width": `${rightWidth}px` } as CSSProperties}
         />
       </div>
@@ -212,6 +233,7 @@ export default function App() {
       <CaddyPanel />
       <PrefsModal />
       <InviteModal />
+      <NewChatModal />
     </SidebarProvider>
   );
 }

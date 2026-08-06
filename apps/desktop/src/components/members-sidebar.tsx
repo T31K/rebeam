@@ -31,7 +31,7 @@ export function MembersSidebar() {
     <Sidebar
       side="right"
       collapsible="none"
-      className="hidden h-svh w-56 pb-7 pt-11 lg:flex"
+      className="hidden h-svh w-56 pb-8 pt-11 lg:flex"
     >
       <SidebarContent>
         <SidebarGroup>

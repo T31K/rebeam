@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { HashIcon, PlusIcon, AtSignIcon, SparklesIcon } from "lucide-react";
+import { MessageSquareIcon, PlusIcon, AtSignIcon, SparklesIcon } from "lucide-react";
 import { mockBrain } from "@/lib/brain";
 import { runPlan } from "@/lib/commands";
 import {
@@ -66,14 +66,14 @@ export function CommandPalette() {
             </CommandItem>
           </CommandGroup>
         )}
-        <CommandGroup heading="Channels">
+        <CommandGroup heading="Chats">
           {channels.map((channel, i) => (
             <CommandItem
               key={channel.id}
               value={`channel ${channel.name}`}
               onSelect={() => run(() => void selectChannel(channel.id))}
             >
-              <HashIcon className="size-4 text-muted-foreground" />
+              <MessageSquareIcon className="size-4 text-muted-foreground" />
               <span>{channel.name}</span>
               {channel.topic && (
                 <span className="truncate text-xs text-muted-foreground">

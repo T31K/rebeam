@@ -1,11 +1,13 @@
 import type {
   Channel,
+  HistoryGrant,
   Invite,
+  Membership,
   Member,
-  MemberType,
   Message,
   Store,
   StoreEvent,
+  Trigger,
 } from "@agentchat/shared";
 
 const now = Date.now();
@@ -37,10 +39,34 @@ const members: Member[] = [
 ];
 
 const channels: Channel[] = [
-  { id: "c_main", name: "main", topic: "humans + agents, one room" },
-  { id: "c_dev", name: "dev", topic: "shipping things" },
-  { id: "c_research", name: "research", topic: "kimi's territory" },
-  { id: "c_showcase", name: "showcase", topic: "AI-native message primitives" },
+  {
+    id: "c_main",
+    name: "main",
+    kind: "group",
+    memberIds: ["u_t31k", "a_claude", "a_kimi"],
+    topic: "humans + agents, one room",
+  },
+  {
+    id: "c_dev",
+    name: "dev",
+    kind: "group",
+    memberIds: ["u_t31k", "a_claude", "a_codex"],
+    topic: "shipping things",
+  },
+  {
+    id: "c_research",
+    name: "research",
+    kind: "group",
+    memberIds: ["u_t31k", "a_kimi"],
+    topic: "kimi's territory",
+  },
+  {
+    id: "c_showcase",
+    name: "showcase",
+    kind: "group",
+    memberIds: ["u_t31k", "a_claude", "a_kimi", "a_codex"],
+    topic: "AI-native message primitives",
+  },
 ];
 
 const seedMessages: Message[] = [
@@ -161,12 +187,17 @@ const agentReplies: Record<string, string[]> = {
 
 export class MockStore implements Store {
   currentUserId = "u_t31k";
+  private channels = channels.map((channel) => ({
+    ...channel,
+    memberIds: [...channel.memberIds],
+  }));
   private messages = [...seedMessages];
   private listeners = new Set<(event: StoreEvent) => void>();
   private replyIdx: Record<string, number> = {};
+  private triggers = new Map<string, Trigger>();
 
   async listChannels() {
-    return channels;
+    return this.channels;
   }
 
   async listMembers() {
@@ -210,12 +241,91 @@ export class MockStore implements Store {
     return message;
   }
 
-  async createInvite(memberType: MemberType): Promise<Invite> {
+  async updateChannel(channelId: string, patch: Partial<Channel>): Promise<Channel> {
+    const index = this.channels.findIndex((channel) => channel.id === channelId);
+    if (index === -1) throw new Error(`no such channel: ${channelId}`);
+    const channel = { ...this.channels[index], ...patch };
+    this.channels[index] = channel;
+    this.emit({ type: "channel.updated", channel });
+    return channel;
+  }
+
+  async createChannel(name: string, topic?: string): Promise<Channel> {
+    const channel: Channel = {
+      id: `c_${crypto.randomUUID().slice(0, 8)}`,
+      name,
+      kind: "group",
+      memberIds: [this.currentUserId],
+      topic,
+    };
+    this.channels.push(channel);
+    return channel;
+  }
+
+  async createInvite(channelId: string, history: HistoryGrant = { t: "all" }): Promise<Invite> {
+    if (!this.channels.some((channel) => channel.id === channelId)) {
+      throw new Error(`no such channel: ${channelId}`);
+    }
     return {
-      code: `ach_inv_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`,
-      memberType,
+      code: `RB-${crypto.randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase()}`,
+      chat: channelId,
+      invitedBy: this.currentUserId,
+      history,
+      expiresAt: Date.now() + 60 * min,
+    };
+  }
+
+  async listMemberships(memberId: string): Promise<Membership[]> {
+    return this.channels
+      .filter((channel) => channel.memberIds.includes(memberId))
+      .map((channel) => ({
+        chat: channel.id,
+        member: memberId,
+        joinedAt: now,
+        historyFloorSeq: 0,
+        cursorSeq: 0,
+        trigger: this.triggers.get(`${channel.id}:${memberId}`) ?? "all",
+      }));
+  }
+
+  async setMemberTrigger(
+    channelId: string,
+    memberId: string,
+    trigger: Trigger,
+  ): Promise<void> {
+    const channel = this.channels.find((candidate) => candidate.id === channelId);
+    if (!channel?.memberIds.includes(memberId)) {
+      throw new Error(`member ${memberId} is not in ${channelId}`);
+    }
+    this.triggers.set(`${channelId}:${memberId}`, trigger);
+  }
+
+  async kickMember(channelId: string, memberId: string): Promise<void> {
+    const channel = this.channels.find((candidate) => candidate.id === channelId);
+    if (!channel) throw new Error(`no such channel: ${channelId}`);
+    if (!channel.memberIds.includes(memberId)) {
+      throw new Error(`member ${memberId} is not in ${channelId}`);
+    }
+    channel.memberIds = channel.memberIds.filter((id) => id !== memberId);
+    const member = members.find((candidate) => candidate.id === memberId);
+    const message: Message = {
+      id: `m_${crypto.randomUUID().slice(0, 8)}`,
+      channelId,
+      authorId: this.currentUserId,
+      kind: "system",
+      text: `removed **${member?.name ?? memberId}**`,
       createdAt: Date.now(),
     };
+    this.messages.push(message);
+    this.emit({ type: "message", message });
+  }
+
+  async resetAgentSession(channelId: string, memberId: string): Promise<void> {
+    const channel = this.channels.find((candidate) => candidate.id === channelId);
+    const member = members.find((candidate) => candidate.id === memberId);
+    if (!channel?.memberIds.includes(memberId) || member?.type !== "agent") {
+      throw new Error(`agent ${memberId} is not in ${channelId}`);
+    }
   }
 
   subscribe(listener: (event: StoreEvent) => void) {

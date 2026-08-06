@@ -114,7 +114,7 @@ export function Composer() {
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}
-          placeholder={channel ? `Message #${channel.name}` : "Pick a channel"}
+          placeholder={channel ? `Message ${channel.name}` : "Pick a chat"}
           rows={1}
           className="max-h-40 min-h-10 flex-1 resize-none"
         />

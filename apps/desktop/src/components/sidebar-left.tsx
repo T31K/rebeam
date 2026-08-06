@@ -6,8 +6,9 @@ import { NavFavorites } from "@/components/nav-favorites"
 import { NavUser } from "@/components/nav-user"
 // import { NavMain } from "@/components/nav-main"
 // import { NavSecondary } from "@/components/nav-secondary"
-import { NavWorkspaces } from "@/components/nav-workspaces"
+// import { NavWorkspaces } from "@/components/nav-workspaces"
 import { TeamSwitcher } from "@/components/team-switcher"
+import { useChat } from "@/lib/use-chat"
 import {
   Sidebar,
   SidebarContent,
@@ -284,6 +285,12 @@ const data = {
   ],
 }
 
+function AuthenticatedUser() {
+  const user = useChat((state) => state.user)
+  if (!user) return null
+  return <NavUser user={{ name: user.name, email: user.email, avatar: "" }} />
+}
+
 export function SidebarLeft({
   ...props
 }: React.ComponentProps<typeof Sidebar>) {
@@ -295,11 +302,11 @@ export function SidebarLeft({
       </SidebarHeader>
       <SidebarContent>
         <NavFavorites />
-        <NavWorkspaces workspaces={data.workspaces} />
+        {/* <NavWorkspaces workspaces={data.workspaces} /> */}
         {/* <NavSecondary items={data.navSecondary} className="mt-auto" /> */}
       </SidebarContent>
       <SidebarFooter>
-        <NavUser user={{ name: "t31k", email: "t31kmunwong@gmail.com", avatar: "" }} />
+        <AuthenticatedUser />
       </SidebarFooter>
       <SidebarRail />
     </Sidebar>

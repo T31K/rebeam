@@ -1,6 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Invite } from "@agentchat/shared";
-import { BotIcon, CheckIcon, CopyIcon, UserIcon } from "lucide-react";
+import { BotIcon, CheckIcon, CopyIcon } from "lucide-react";
+import type { IconType } from "react-icons";
+import { VscOpenai } from "react-icons/vsc";
+import { SiClaudecode } from "react-icons/si";
+import { GiWingfoot } from "react-icons/gi";
 import {
   Dialog,
   DialogContent,
@@ -8,99 +12,143 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { createInvite, useChat } from "@/lib/use-chat";
+import { createPairing } from "@/lib/auth";
+
+type AgentProvider = "claude" | "codex" | "hermes";
+
+const providers: Array<{ id: AgentProvider; label: string; icon: IconType }> = [
+  { id: "claude", label: "Claude", icon: SiClaudecode },
+  { id: "codex", label: "Codex", icon: VscOpenai },
+  { id: "hermes", label: "Hermes", icon: GiWingfoot },
+];
 
 export function InviteModal() {
-  const { inviteOpen, setInviteOpen } = useChat();
+  const { inviteOpen, setInviteOpen, channels, activeChannelId } = useChat();
   const [invite, setInvite] = useState<Invite | null>(null);
   const [copied, setCopied] = useState(false);
+  const [agentName, setAgentName] = useState("");
+  const [provider, setProvider] = useState<AgentProvider>("claude");
+  const [pairingCode, setPairingCode] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const channel = channels.find((c) => c.id === activeChannelId);
 
-  const generate = async () => {
-    setInvite(await createInvite("agent"));
-    setCopied(false);
-  };
+  useEffect(() => {
+    if (inviteOpen) {
+      setInvite(null);
+      setError(null);
+      setCopied(false);
+      setAgentName("");
+      setProvider("claude");
+      void generate();
+      void createPairing().then(setPairingCode).catch((error) => setError(error instanceof Error ? error.message : String(error)));
+    }
+  }, [inviteOpen, activeChannelId]);
+
+  async function generate() {
+    if (!activeChannelId) return;
+    setError(null);
+    try {
+      setInvite(await createInvite(activeChannelId));
+      setCopied(false);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
+    }
+  }
 
   const snippet = invite
-    ? `curl -fsSL https://agentchat.dev/install.sh | sh\nagentchat join ${invite.code}`
+    ? `rebeam connect ${invite.code} --provider ${provider} --name ${agentName.trim() || "<agent-name>"}`
     : "";
-
-  const copy = async () => {
-    await navigator.clipboard.writeText(snippet);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  };
-
   return (
     <Dialog open={inviteOpen} onOpenChange={setInviteOpen}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="border-border/90 bg-card shadow-2xl sm:max-w-xl">
         <DialogHeader>
-          <DialogTitle>Invite to workspace</DialogTitle>
+          <DialogTitle className="flex items-center gap-2"><BotIcon className="size-4" /> Connect an agent</DialogTitle>
           <DialogDescription>
-            Humans and agents are both first-class citizens here.
+            Connect the agent for {channel ? channel.name : "this chat"}.
           </DialogDescription>
         </DialogHeader>
-        <Tabs defaultValue="agent">
-          <TabsList className="w-full">
-            <TabsTrigger value="agent" className="flex-1 gap-1.5">
-              <BotIcon className="size-3.5" /> Agent
-            </TabsTrigger>
-            <TabsTrigger value="human" className="flex-1 gap-1.5">
-              <UserIcon className="size-3.5" /> Human
-            </TabsTrigger>
-          </TabsList>
-
-          <TabsContent value="agent" className="space-y-3 pt-2">
+        <div className="space-y-4 pt-2">
+          <Instruction number="1" title="Install Rebeam CLI" command="curl -fsSL https://raw.githubusercontent.com/T31K/rebeam/main/install.sh | sh" />
+          <Instruction number="2" title="Pair this machine" command={pairingCode ? `rebeam pair ${pairingCode}` : "Preparing pairing command…"} />
+          <div className="rounded-lg border p-3">
+            <div className="mb-2 flex items-center gap-2 text-sm font-medium"><span className="flex size-5 items-center justify-center rounded-full bg-muted font-mono text-[10px]">3</span> Ask your agent to join</div>
             {invite ? (
               <>
-                <p className="text-sm text-muted-foreground">
-                  Run this wherever your agent lives — laptop, VPS, Mac mini:
-                </p>
-                <div className="relative rounded-lg border bg-muted/40 p-3 font-mono text-xs leading-relaxed">
-                  <pre className="whitespace-pre-wrap">{snippet}</pre>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    className="absolute right-1.5 top-1.5 size-7"
-                    onClick={copy}
+                <div className="mb-3 space-y-2">
+                  <Label>Agent</Label>
+                  <div
+                    className="grid grid-cols-3 gap-1 rounded-lg border border-border/80 bg-background/40 p-1"
+                    role="radiogroup"
+                    aria-label="Agent provider"
                   >
-                    {copied ? (
-                      <CheckIcon className="size-3.5 text-emerald-400" />
-                    ) : (
-                      <CopyIcon className="size-3.5" />
-                    )}
-                  </Button>
+                    {providers.map((option) => {
+                      const selected = provider === option.id;
+                      const ProviderIcon = option.icon;
+                      return (
+                        <button
+                          key={option.id}
+                          type="button"
+                          role="radio"
+                          aria-checked={selected}
+                          onClick={() => {
+                            setProvider(option.id);
+                            setCopied(false);
+                          }}
+                          className={`relative flex items-center justify-center gap-2 rounded-md px-3 py-2 text-xs font-medium transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
+                            selected
+                              ? "bg-muted text-foreground shadow-sm"
+                              : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                          }`}
+                        >
+                          <span
+                            className={`flex size-6 items-center justify-center rounded-md border bg-background/70 transition-colors ${
+                              selected ? "border-border" : "border-transparent"
+                            }`}
+                          >
+                            <ProviderIcon className="size-4" aria-hidden="true" />
+                          </span>
+                          {option.label}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
-                <p className="text-xs text-muted-foreground">
-                  The agent shows up in the sidebar with its own identity and
-                  presence the moment it joins.
-                </p>
+                <div className="mb-3 space-y-2">
+                  <Label htmlFor="agent-name">Agent name</Label>
+                  <Input
+                    id="agent-name"
+                    autoFocus
+                    value={agentName}
+                    onChange={(event) => {
+                      setAgentName(event.target.value);
+                      setCopied(false);
+                    }}
+                    placeholder={`e.g. ${provider}-main`}
+                  />
+                </div>
+                <p className="mb-2 text-xs text-muted-foreground">Paste this into the terminal where the agent runs.</p>
+                <CopyableCommand command={snippet} copied={copied} onCopy={async () => { await navigator.clipboard.writeText(snippet); setCopied(true); setTimeout(() => setCopied(false), 1500); }} />
               </>
             ) : (
-              <Button className="w-full" onClick={generate}>
-                Generate invite code
-              </Button>
+              <p className="py-5 text-center text-sm text-muted-foreground">Preparing your agent command…</p>
             )}
-          </TabsContent>
-
-          <TabsContent value="human" className="space-y-3 pt-2">
-            <p className="text-sm text-muted-foreground">
-              Send an invite link to a teammate:
-            </p>
-            <div className="flex gap-2">
-              <Input placeholder="teammate@example.com" type="email" />
-              <Button disabled title="Coming with the hosted relay">
-                Send
-              </Button>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Email invites arrive with the hosted relay (phase 2).
-            </p>
-          </TabsContent>
-        </Tabs>
+          </div>
+          {error && <p className="text-xs text-destructive">{error}</p>}
+        </div>
       </DialogContent>
     </Dialog>
   );
+}
+
+function Instruction({ number, title, command }: { number: string; title: string; command: string }) {
+  const [copied, setCopied] = useState(false);
+  return <div className="rounded-lg border p-3"><div className="mb-2 flex items-center gap-2 text-sm font-medium"><span className="flex size-5 items-center justify-center rounded-full bg-muted font-mono text-[10px]">{number}</span>{title}</div><div className="relative rounded-md bg-muted/40 px-2.5 py-2 font-mono text-xs text-muted-foreground"><pre className="whitespace-pre-wrap">{command}</pre><Button size="icon" variant="ghost" className="absolute right-1 top-1 size-7" onClick={() => void navigator.clipboard.writeText(command).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); })}>{copied ? <CheckIcon className="size-3.5 text-emerald-400" /> : <CopyIcon className="size-3.5" />}</Button></div></div>;
+}
+
+function CopyableCommand({ command, copied, onCopy }: { command: string; copied: boolean; onCopy: () => Promise<void> }) {
+  return <div className="relative rounded-md bg-muted/40 p-2.5 font-mono text-xs leading-relaxed"><pre className="whitespace-pre-wrap">{command}</pre><Button size="icon" variant="ghost" className="absolute right-1 top-1 size-7" onClick={() => void onCopy()}>{copied ? <CheckIcon className="size-3.5 text-emerald-400" /> : <CopyIcon className="size-3.5" />}</Button></div>;
 }
