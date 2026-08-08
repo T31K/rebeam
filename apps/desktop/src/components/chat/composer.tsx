@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { SendIcon } from "lucide-react";
+import { SendIcon } from "@/components/ui/icons";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { MemberAvatar } from "@/components/member-avatar";

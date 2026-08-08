@@ -1,5 +1,5 @@
 import type { Message } from "@agentchat/shared";
-import { CheckIcon, CircleAlertIcon } from "lucide-react";
+import { CheckIcon, CircleAlertIcon } from "@/components/ui/icons";
 import { Button } from "@/components/ui/button";
 import { useChat } from "@/lib/use-chat";
 import { cn } from "@/lib/utils";

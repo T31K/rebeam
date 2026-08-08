@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { MessageSquareIcon, PlusIcon, AtSignIcon, SparklesIcon } from "lucide-react";
+import { MessageSquareIcon, PlusIcon, AtSignIcon, SparklesIcon } from "@/components/ui/icons";
 import { mockBrain } from "@/lib/brain";
 import { runPlan } from "@/lib/commands";
 import {

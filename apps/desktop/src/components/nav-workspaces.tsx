@@ -15,7 +15,7 @@ import {
   SidebarMenuSubButton,
   SidebarMenuSubItem,
 } from "@/components/ui/sidebar"
-import { ChevronRightIcon, PlusIcon, MoreHorizontalIcon } from "lucide-react"
+import { ChevronRightIcon, PlusIcon, MoreHorizontalIcon } from "@/components/ui/icons"
 
 export function NavWorkspaces({
   workspaces,

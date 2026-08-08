@@ -35,7 +35,7 @@ import {
   BellOffIcon,
   MessageSquareIcon,
   PlusIcon,
-} from "lucide-react"
+} from "@/components/ui/icons"
 import type { Channel, Member } from "@agentchat/shared"
 import { Badge } from "@/components/ui/badge"
 import { AvatarFrame } from "@/components/member-avatar"

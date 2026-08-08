@@ -16,7 +16,7 @@ import {
   SidebarMenuItem,
   SidebarSeparator,
 } from "@/components/ui/sidebar"
-import { ChevronRightIcon, CheckIcon } from "lucide-react"
+import { ChevronRightIcon, CheckIcon } from "@/components/ui/icons"
 
 export function Calendars({
   calendars,

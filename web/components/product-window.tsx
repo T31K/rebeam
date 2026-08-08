@@ -13,7 +13,7 @@ import {
   Send,
   Unplug,
   X,
-} from "lucide-react";
+} from "@/components/ui/icons";
 
 type DemoAgent = {
   id: string;

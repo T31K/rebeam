@@ -1,7 +1,7 @@
 import { MessageList } from "@/components/chat/message-list";
 import { Composer } from "@/components/chat/composer";
 import { LoadingState } from "@/components/ai";
-import { InfoIcon } from "lucide-react";
+import { InfoIcon } from "@/components/ui/icons";
 import { Button } from "@/components/ui/button";
 import {
   Tooltip,

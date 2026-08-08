@@ -6,7 +6,7 @@ import {
   PlusIcon,
   ZapIcon,
   BoxIcon,
-} from "lucide-react";
+} from "@/components/ui/icons";
 import {
   ContextMenu,
   ContextMenuContent,

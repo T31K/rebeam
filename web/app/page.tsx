@@ -1,4 +1,4 @@
-import { ArrowDown, Download, GitBranch, MonitorDown } from "lucide-react";
+import { ArrowDown, Download, GitBranch, MonitorDown } from "@/components/ui/icons";
 import { Button } from "@/components/ui/button";
 import { CopyCommand } from "@/components/copy-command";
 import { DitherBackdrop } from "@/components/dither-backdrop";

@@ -9,7 +9,7 @@ import {
   RotateCcwIcon,
   UnplugIcon,
   XIcon,
-} from "lucide-react";
+} from "@/components/ui/icons";
 import { AvatarFrame, PresenceDot } from "@/components/member-avatar";
 import { Button } from "@/components/ui/button";
 import {

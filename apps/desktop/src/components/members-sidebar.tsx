@@ -1,4 +1,4 @@
-import { AtSignIcon, CopyIcon, PlusIcon, UnplugIcon } from "lucide-react";
+import { AtSignIcon, CopyIcon, PlusIcon, UnplugIcon } from "@/components/ui/icons";
 import {
   ContextMenu,
   ContextMenuContent,

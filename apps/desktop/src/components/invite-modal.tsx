@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Invite } from "@agentchat/shared";
-import { BotIcon, CheckIcon, CopyIcon } from "lucide-react";
+import { BotIcon, CheckIcon, CopyIcon } from "@/components/ui/icons";
 import type { IconType } from "react-icons";
 import { VscOpenai } from "react-icons/vsc";
 import { SiClaudecode } from "react-icons/si";

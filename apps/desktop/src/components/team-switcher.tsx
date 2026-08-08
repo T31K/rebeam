@@ -13,7 +13,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar"
-import { ChevronDownIcon, PlusIcon } from "lucide-react"
+import { ChevronDownIcon, PlusIcon } from "@/components/ui/icons"
 
 export function TeamSwitcher({
   teams,
@@ -36,7 +36,7 @@ export function TeamSwitcher({
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <SidebarMenuButton className="h-9 px-1.5">
-              <div className="flex aspect-square size-5 items-center justify-center rounded-md bg-sidebar-primary text-sidebar-primary-foreground">
+              <div className="flex size-6 shrink-0 items-center justify-center rounded-xs border bg-background text-foreground [&_svg]:size-4">
                 {activeTeam.logo}
               </div>
               <span className="truncate font-medium">{activeTeam.name}</span>

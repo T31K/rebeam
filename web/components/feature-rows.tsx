@@ -1,4 +1,4 @@
-import { Bot, Circle, MessageSquareText, Radio, Server } from "lucide-react";
+import { Bot, Circle, MessageSquareText, Radio, Server } from "@/components/ui/icons";
 
 const features = [
   {

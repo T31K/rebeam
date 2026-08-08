@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { CheckIcon, SparklesIcon, XIcon } from "lucide-react";
+import { CheckIcon, SparklesIcon, XIcon } from "@/components/ui/icons";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { mockBrain } from "@/lib/brain";

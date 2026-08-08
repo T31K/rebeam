@@ -8,7 +8,7 @@ import {
   MessageScrollerProvider,
   MessageScrollerViewport,
 } from "@/components/ui/message-scroller";
-import { CopyIcon, AtSignIcon, CornerUpLeftIcon } from "lucide-react";
+import { CopyIcon, AtSignIcon, CornerUpLeftIcon } from "@/components/ui/icons";
 import { Badge } from "@/components/ui/badge";
 import {
   ContextMenu,
