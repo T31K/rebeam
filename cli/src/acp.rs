@@ -32,17 +32,41 @@ use std::str::FromStr;
 /// else.
 pub fn adapter_command(provider: &str) -> Result<String> {
     match provider.trim().to_ascii_lowercase().as_str() {
-        // Official, wraps the Claude Agent SDK. Needs a signed-in Claude
-        // (ANTHROPIC_API_KEY or `claude` login) to actually answer.
-        "claude" => npx("@agentclientprotocol/claude-agent-acp"),
+        // Our own CLI-driven adapter: uses the Claude Code subscription login,
+        // no Node, no API key. This is the default because it's what users have.
+        "claude" => claude_code_adapter(),
+        // The official Agent-SDK adapter — API-key billing only (Anthropic
+        // blocks subscription auth for the SDK). Opt in with `--provider claude-api`.
+        "claude-api" => npx("@agentclientprotocol/claude-agent-acp"),
         "codex" => npx("@zed-industries/codex-acp"),
         // The Gemini CLI is an ACP agent itself — no adapter needed.
         "gemini" => native("gemini --experimental-acp", "gemini"),
         other => bail!(
-            "unknown provider {other:?}. Known: claude, codex, gemini. \
+            "unknown provider {other:?}. Known: claude, claude-api, codex, gemini. \
              For anything else pass --command \"<acp launcher>\"."
         ),
     }
+}
+
+/// The `claude-code-acp` binary rebeam ships alongside itself — prefer the one
+/// next to the running `rebeam`, else fall back to PATH.
+fn claude_code_adapter() -> Result<String> {
+    let sibling = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("claude-code-acp")))
+        .filter(|path| path.is_file());
+    let command = match sibling {
+        Some(path) => path.display().to_string(),
+        None if on_path("claude-code-acp") => "claude-code-acp".to_string(),
+        None => bail!("the claude-code-acp adapter is missing (not next to rebeam or on PATH)"),
+    };
+    if !on_path("claude") {
+        eprintln!(
+            "{} the `claude` CLI is not on PATH — the adapter needs it; run `claude login`.",
+            "warning".yellow()
+        );
+    }
+    Ok(command)
 }
 
 /// An npm-published adapter, launched on demand. `npx -y` runs it without a
