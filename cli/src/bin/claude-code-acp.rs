@@ -23,7 +23,7 @@ use agent_client_protocol::schema::v1::{
     AgentCapabilities, ContentBlock, ContentChunk, InitializeRequest, InitializeResponse,
     NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind, PromptRequest,
     PromptResponse, SessionId, SessionNotification, SessionUpdate, StopReason, TextContent,
-    ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+    ToolCall, ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
 use agent_client_protocol::{Agent, Result, Stdio as AcpStdio};
 use serde_json::Value;
@@ -172,22 +172,33 @@ async fn main() -> Result<()> {
                                             let name = block
                                                 .get("name")
                                                 .and_then(Value::as_str)
-                                                .unwrap_or("tool")
-                                                .to_string();
+                                                .unwrap_or("tool");
+                                            // A short preview from whatever the
+                                            // tool acted on, for the chip title.
+                                            let preview = block
+                                                .get("input")
+                                                .and_then(|input| {
+                                                    ["command", "file_path", "path", "pattern", "url"]
+                                                        .iter()
+                                                        .find_map(|k| {
+                                                            input.get(k).and_then(Value::as_str)
+                                                        })
+                                                })
+                                                .unwrap_or("");
+                                            let title = if preview.is_empty() {
+                                                name.to_string()
+                                            } else {
+                                                format!("{name}: {preview}")
+                                            };
                                             connection.send_notification(
                                                 SessionNotification::new(
                                                     req.session_id.clone(),
-                                                    SessionUpdate::ToolCallUpdate(
-                                                        ToolCallUpdate::new(
-                                                            ToolCallId::new(format!(
-                                                                "call_{tool_counter}"
-                                                            )),
-                                                            ToolCallUpdateFields::new()
-                                                                .title(name)
-                                                                .kind(ToolKind::Execute)
-                                                                .status(ToolCallStatus::InProgress),
-                                                        ),
-                                                    ),
+                                                    SessionUpdate::ToolCall(ToolCall::new(
+                                                        ToolCallId::new(format!(
+                                                            "call_{tool_counter}"
+                                                        )),
+                                                        title,
+                                                    )),
                                                 ),
                                             )?;
                                         }
