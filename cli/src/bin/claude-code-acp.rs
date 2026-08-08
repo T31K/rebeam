@@ -40,6 +40,45 @@ struct SessionState {
 
 type Sessions = Arc<Mutex<HashMap<String, SessionState>>>;
 
+/// Where per-chat Claude session ids are persisted. The gateway spawns this
+/// adapter fresh for every message, so in-memory state can't carry a
+/// conversation forward — we persist Claude's `session_id` keyed by chat
+/// (REBEAM_CHAT) and `--resume` it, which is what makes the agent remember.
+fn session_file(chat: &str) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let safe: String = chat
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    Some(
+        PathBuf::from(home)
+            .join(".rebeam")
+            .join("sessions")
+            .join(format!("{safe}.txt")),
+    )
+}
+
+fn load_claude_session(chat: &str) -> Option<String> {
+    let text = std::fs::read_to_string(session_file(chat)?).ok()?;
+    let trimmed = text.trim().to_string();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+fn save_claude_session(chat: &str, id: &str) {
+    if let Some(path) = session_file(chat) {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, id);
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
@@ -98,8 +137,26 @@ async fn main() -> Result<()> {
                     "--output-format".into(),
                     "stream-json".into(),
                     "--verbose".into(),
+                    // Don't inherit the user's personal MCP servers (reminders,
+                    // calendar, contacts, …). They trigger macOS permission
+                    // prompts attributed to `rebeam` and aren't the agent's job.
+                    "--strict-mcp-config".into(),
+                    // Headless has no one at the terminal to approve tools, so a
+                    // gated tool just dead-ends ("please approve"). This is your
+                    // own agent on your own machine — let it run its tools, the
+                    // way your interactive `claude` does. (Human-in-the-loop
+                    // approval via the app is a separate, opt-in path.)
+                    "--dangerously-skip-permissions".into(),
                 ];
-                if let Some(sid) = &claude_session_id {
+                // Resume this chat's Claude session so the agent remembers the
+                // conversation. Persisted per chat (REBEAM_CHAT) because the
+                // gateway spawns this adapter fresh on every message.
+                let resume_id = std::env::var("REBEAM_CHAT")
+                    .ok()
+                    .filter(|c| !c.is_empty())
+                    .and_then(|c| load_claude_session(&c))
+                    .or_else(|| claude_session_id.clone());
+                if let Some(sid) = &resume_id {
                     args.push("--resume".into());
                     args.push(sid.clone());
                 }
@@ -245,6 +302,12 @@ async fn main() -> Result<()> {
                 }
 
                 if let Some(sid) = new_claude_session {
+                    // Persist for the next message in this chat (continuity).
+                    if let Ok(chat) = std::env::var("REBEAM_CHAT") {
+                        if !chat.is_empty() {
+                            save_claude_session(&chat, &sid);
+                        }
+                    }
                     for_prompt
                         .lock()
                         .await

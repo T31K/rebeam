@@ -161,6 +161,10 @@ enum Verb {
         /// Connect only; don't start the gateway
         #[arg(long)]
         no_gateway: bool,
+        /// Project directory the agent works in (reads its CLAUDE.md/docs).
+        /// Defaults to the current directory.
+        #[arg(long)]
+        cwd: Option<PathBuf>,
     },
 
     /// Run an ACP-speaking agent for one prompt. rebeam provisions the adapter.
@@ -172,15 +176,22 @@ enum Verb {
         /// e.g. "npx -y @agentclientprotocol/claude-agent-acp"
         #[arg(short, long)]
         command: Option<String>,
-        /// Prompt to send
+        /// Prompt to send (gateway mode reads $REBEAM_CONTEXT instead)
         #[arg(short = 'm', long)]
-        message: String,
+        message: Option<String>,
         /// Deny every permission request instead of auto-allowing
         #[arg(long)]
         deny: bool,
         /// Print the resolved adapter command and exit, without launching it
         #[arg(long)]
         dry_run: bool,
+        /// Gateway mode: post tool telemetry to the relay, print the reply on stdout
+        #[arg(long)]
+        gateway: bool,
+        /// Working directory the agent operates in (its project — reads that
+        /// project's CLAUDE.md/docs). Defaults to the current directory.
+        #[arg(long)]
+        cwd: Option<PathBuf>,
     },
 
     /// Pair this machine with a Rebeam workspace
@@ -442,10 +453,27 @@ async fn run() -> Result<ExitCode> {
             exec,
             config,
             no_gateway,
+            cwd,
         } => {
             let provider = provider.as_str();
+            // Where the agent works: the given --cwd, else the directory connect
+            // is run from — so `cd Projects/BG && rebeam connect …` binds it to BG.
+            let work_dir = cwd
+                .clone()
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| PathBuf::from("."));
             let exec = match exec {
                 Some(e) => e.clone(),
+                // ACP providers run through rebeam's ACP bridge: it streams tool
+                // chips to the relay and (for claude) uses the subscription login.
+                // The gateway captures the reply on stdout. --cwd makes claude
+                // read that project's CLAUDE.md/docs.
+                None if matches!(provider, "claude" | "codex") => {
+                    format!(
+                        "rebeam acp --provider {provider} --gateway --cwd {}",
+                        shell_quote(&work_dir.display().to_string())
+                    )
+                }
                 None => {
                     if !which(provider) {
                         bail!("{provider} is not installed or is not on PATH");
@@ -541,6 +569,8 @@ async fn run() -> Result<ExitCode> {
             message,
             deny,
             dry_run,
+            gateway,
+            cwd,
         } => {
             let cmd = match (command, provider) {
                 (Some(command), _) => command.clone(),
@@ -557,7 +587,42 @@ async fn run() -> Result<ExitCode> {
                 } else {
                     acp::Approve::Auto
                 };
-                acp::run(&cmd, message, approve).await?;
+                let (prompt, mode) = if *gateway {
+                    // The gateway hands us the rendered context via env and the
+                    // machine credential on disk; the reply goes back on stdout.
+                    let token_path = default_config_path()
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .join("machine-token");
+                    let token = std::fs::read_to_string(&token_path)
+                        .map(|t| t.trim().to_string())
+                        .with_context(|| {
+                            format!(
+                                "no machine credential at {} — run `rebeam pair <code>`",
+                                token_path.display()
+                            )
+                        })?;
+                    let chat = std::env::var("REBEAM_CHAT")
+                        .context("REBEAM_CHAT is unset (gateway mode)")?;
+                    let prompt = std::env::var("REBEAM_CONTEXT")
+                        .ok()
+                        .filter(|value| !value.is_empty())
+                        .or_else(|| message.clone())
+                        .unwrap_or_default();
+                    let mode = acp::Mode::Gateway {
+                        relay: cli.relay.clone(),
+                        chat,
+                        agent: cli.author.clone(),
+                        token,
+                    };
+                    (prompt, mode)
+                } else {
+                    let prompt = message
+                        .clone()
+                        .context("pass -m <prompt> (or use --gateway)")?;
+                    (prompt, acp::Mode::Terminal)
+                };
+                acp::run(&cmd, &prompt, approve, mode, cwd.clone()).await?;
             }
         }
 
@@ -799,6 +864,12 @@ fn which(bin: &str) -> bool {
     std::env::var_os("PATH")
         .map(|path| std::env::split_paths(&path).any(|dir| dir.join(bin).is_file()))
         .unwrap_or(false)
+}
+
+/// POSIX single-quote a value so it survives `sh -c` word-splitting (the exec
+/// string is run via the shell by the gateway).
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 fn hostname() -> String {

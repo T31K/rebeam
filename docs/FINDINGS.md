@@ -121,3 +121,70 @@ the whole turn stream with ~20 lines of config and no bridge process. It also
 ships as an installable plugin into the largest agent population.
 
 Build order: mirror hooks → `up` → both on the same CLI.
+
+## 2026-08-08 — ACP is the bridge; Buzz teardown
+
+### Decision: adopt ACP (Agent Client Protocol)
+The agent-agnostic bridge is a solved problem — **ACP**, Zed's open standard
+(JSON-RPC/stdio). One client drives Claude/Codex/Gemini/Cursor/…; `session/update`
+gives streaming tool telemetry, `session/request_permission` gives the approval
+hook. We use the **official Rust SDK** (`agent-client-protocol` 2.0.0). Built it:
+see **`docs/AGENT_BRIDGE.md`** for the full architecture. Highlights:
+
+- **`claude-code-acp`** — our own Rust ACP adapter wrapping `claude -p` →
+  **subscription auth, no Node, no API key**. The official `claude-agent-acp`
+  wraps the Agent SDK → API-key-only (Anthropic blocks subscription for the SDK).
+  Wrapping the CLI is the only subscription path; **Buzz doesn't have it**.
+- **Session continuity** fixed by persisting Claude's `session_id` per chat and
+  `--resume`-ing. **`--cwd`** binds an agent to a project dir (reads its docs).
+- The **approval card** is the moat (see below) — not built yet; today we stopgap
+  with `--dangerously-skip-permissions` for trusted personal agents.
+
+### The bridge is commoditising (competitive)
+Products already do "control your coding agent from chat with approvals":
+OpenACP (OSS, ACP-based, now gone), Omnara, Happy (`slopus/happy`), cc-connect.
+All **single-user "me + my agent."** Our moat is the multiplayer layer: agents as
+members alongside multiple humans, cross-user agent sharing, projects-not-channels,
+cloud-hosted, beautiful UI. The bridge is table stakes; don't treat it as the moat.
+
+### Buzz (block/buzz) teardown — the closest prior art
+Block's agent-chat, 269k-LOC Rust monorepo, ACP-based (hand-rolled, not the SDK),
+built on **Nostr**. What they get right and what to copy:
+- **Long-lived agent process, session-per-channel** (`HashMap<channel → session_id>`,
+  `pool.rs`) — reuse the ACP session per chat; don't spawn per message. (We fixed
+  the symptom with disk-persisted session ids; their in-memory pool is the scale-up.)
+- **Agent publishes its own messages via a tool call**, signed by its own key —
+  reasoning/tool-calls stay invisible; only published messages are chat events.
+- **Observer frames** (owner-encrypted, ephemeral) for "agent working" telemetry
+  off the timeline; typing + turn-liveness indicators.
+- **Persona file** (`.persona.md`: frontmatter + markdown-as-system-prompt,
+  `runtime`/`model`/declarative `triggers`); pack manifest with layered defaults.
+- Owner-attested connect (their invite mechanic); rotate-session-after-N-turns to
+  bound context.
+
+**Buzz's weaknesses = our openings** (do NOT copy):
+1. **Nostr as identity/storage/authz** — root of their pain: `nsec` = identity with
+   **no recovery**, a 4.3k-LOC pairing stack just for a 2nd device, moderation-as-
+   event-kinds, relay-as-central-signer, per-message signature verification. Yet
+   it's fully centralised anyway. Normal login beats QR/SAS key-pairing day one.
+2. **Channels-everywhere.** Their "projects" are mostly *designed, not built*,
+   bolted onto channels. Exactly the Oliur demand-signal gap — projects-first wins.
+3. **No human tool-approval.** Their marquee "approve the merge" is a **stub that
+   fails the run** (WF-08); their agent path auto-executes tools with **no gate**
+   and a deliberately network-widened sandbox. A polished approve-from-your-phone
+   card is an immediate, defensible differentiator — the thing Block couldn't ship.
+4. **Kitchen-sink monolith** — git host + WebRTC voice SFU + tunnel + 127 event
+   kinds + 50 flags/47 env vars per crate. Scope discipline + design is our edge
+   (match useful behaviour in ~1/10 the code, spend the rest on UI).
+5. **Stubs sold as features** — rate limiter is a no-op `AlwaysAllow`; audit log is
+   keyless. If we add these, actually enforce them.
+
+We're already **ahead** on two axes: durable continuity (we survive a process
+crash; Buzz loses chat memory) and **subscription Claude** (they're API-key-only).
+
+### The permission model, straight
+Per-tool "approve from chat" is genuinely hard — **even Block punted.** The clean
+design: don't skip permissions and don't blanket-allow; route the ACP
+`request_permission` to the human (owner's phone for a lent agent), resume on the
+tap. Make it a **per-agent policy** (`trusted` vs `ask`). `--dangerously-skip-
+permissions` is a stopgap for your-own-agent-your-own-machine only.
