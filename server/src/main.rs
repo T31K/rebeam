@@ -6,12 +6,13 @@
 
 mod store;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
     extract::{
-        ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
+        ws::{close_code, CloseFrame, Message as WsMessage, WebSocket, WebSocketUpgrade},
         Path, State,
     },
     http::{header, HeaderValue, Method, StatusCode},
@@ -20,13 +21,17 @@ use axum::{
     Json, Router,
 };
 use futures_util::{SinkExt, StreamExt};
-use rebeam_core::{Command, Event, HistoryGrant, Message, MessageKind, Trigger};
+use rebeam_core::{
+    Approval, Command, Event, HistoryGrant, Message, MessageKind, StatusState, Trigger,
+};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::broadcast;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
-use crate::store::{Store, User};
+use crate::store::{
+    ApprovalCreate, ApprovalTransition, AuthError, DevicePoll, MachineRecord, Store, User,
+};
 
 const DEFAULT_PORT: u16 = 8787;
 
@@ -59,6 +64,8 @@ async fn main() {
         events,
     };
 
+    tokio::spawn(expiry_sweeper(app_state.clone()));
+
     let app = router(app_state);
 
     let port: u16 = std::env::var("PORT")
@@ -76,18 +83,30 @@ async fn main() {
 fn router(app_state: App) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/auth/register", post(register))
+        .route("/auth/login", post(login))
+        .route("/auth/refresh", post(refresh))
         .route("/auth/me", get(me))
         .route("/auth/logout", post(logout))
+        .route("/auth/device/start", post(start_device_auth))
+        .route("/auth/device/approve", post(approve_device_auth))
+        .route("/auth/device/token", post(poll_device_auth))
+        .route("/auth/machine", get(machine_me))
+        .route("/auth/machine/logout", post(machine_logout))
         .route("/bootstrap", post(bootstrap))
         .route("/pairings", post(create_pairing))
         .route("/pair", post(pair))
         .route("/machines", get(machines))
+        .route("/machines/runtimes", post(report_runtime_inventory))
+        .route("/machines/{id}", axum::routing::delete(revoke_machine))
         .route("/machines/heartbeat", post(heartbeat))
         .route("/chats", get(chats).post(create_chat))
         .route("/chats/{id}", patch(update_chat))
         .route("/members", get(members))
         .route("/chats/{id}/messages", get(messages))
         .route("/commands", post(command))
+        .route("/approvals", get(approvals))
+        .route("/approvals/{id}", get(approval))
         .route("/messages/{id}", get(message))
         .route("/invites", post(create_invite))
         .route("/connect", post(connect))
@@ -134,10 +153,210 @@ async fn health() -> impl IntoResponse {
 }
 
 async fn bootstrap(State(app): State<App>) -> Result<impl IntoResponse, Fail> {
+    if !bootstrap_enabled() {
+        return Err(Fail::not_found("not found".into()));
+    }
     let session = app.store.bootstrap_workspace()?;
-    Ok(Json(
-        json!({ "token": session.token, "user": session.user }),
-    ))
+    Ok(Json(session))
+}
+
+fn bootstrap_enabled() -> bool {
+    bootstrap_enabled_for(
+        std::env::var("REBEAM_ALLOW_BOOTSTRAP").ok().as_deref(),
+        cfg!(debug_assertions),
+    )
+}
+
+fn bootstrap_enabled_for(setting: Option<&str>, debug_build: bool) -> bool {
+    match setting {
+        Some("1") | Some("true") => true,
+        Some("0") | Some("false") => false,
+        _ => debug_build,
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RegisterRequest {
+    email: String,
+    name: String,
+    password: String,
+}
+
+async fn register(
+    State(app): State<App>,
+    Json(body): Json<RegisterRequest>,
+) -> Result<impl IntoResponse, Fail> {
+    validate_registration(&body)?;
+    let store = app.store.clone();
+    let session = tokio::task::spawn_blocking(move || {
+        store.register(&body.email, &body.name, &body.password)
+    })
+    .await
+    .map_err(|_| Fail::internal("authentication worker stopped".into()))?
+    .map_err(auth_error)?;
+    Ok(Json(session))
+}
+
+#[derive(Deserialize)]
+struct LoginRequest {
+    email: String,
+    password: String,
+}
+
+async fn login(
+    State(app): State<App>,
+    Json(body): Json<LoginRequest>,
+) -> Result<impl IntoResponse, Fail> {
+    if body.email.len() > 254 || body.password.len() > 1_024 {
+        return Err(Fail::unauthorized("email or password is incorrect".into()));
+    }
+    let store = app.store.clone();
+    let session = tokio::task::spawn_blocking(move || store.login(&body.email, &body.password))
+        .await
+        .map_err(|_| Fail::internal("authentication worker stopped".into()))?
+        .map_err(auth_error)?;
+    Ok(Json(session))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RefreshRequest {
+    refresh_token: String,
+}
+
+async fn refresh(
+    State(app): State<App>,
+    Json(body): Json<RefreshRequest>,
+) -> Result<impl IntoResponse, Fail> {
+    let session = app
+        .store
+        .refresh_session(&body.refresh_token)
+        .map_err(auth_error)?;
+    Ok(Json(session))
+}
+
+fn validate_registration(body: &RegisterRequest) -> Result<(), Fail> {
+    let email = body.email.trim();
+    let name = body.name.trim();
+    let valid_email = email.len() <= 254
+        && !email.chars().any(char::is_whitespace)
+        && email
+            .split_once('@')
+            .is_some_and(|(local, domain)| !local.is_empty() && domain.contains('.'));
+    if !valid_email {
+        return Err(Fail::bad_request("enter a valid email address".into()));
+    }
+    if name.is_empty() || name.len() > 80 {
+        return Err(Fail::bad_request(
+            "name must be between 1 and 80 characters".into(),
+        ));
+    }
+    if !(8..=1_024).contains(&body.password.len()) {
+        return Err(Fail::bad_request(
+            "password must be between 8 and 1024 characters".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn auth_error(error: AuthError) -> Fail {
+    match error {
+        AuthError::DuplicateEmail => Fail::conflict("an account already uses that email".into()),
+        AuthError::InvalidCredentials => {
+            Fail::unauthorized("email or password is incorrect".into())
+        }
+        AuthError::RateLimited => Fail::too_many("try signing in again later".into()),
+        AuthError::Password => Fail::internal("could not secure the password".into()),
+        AuthError::Database(error) => Fail::from(error),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceStartRequest {
+    machine_name: String,
+}
+
+async fn start_device_auth(
+    State(app): State<App>,
+    Json(body): Json<DeviceStartRequest>,
+) -> Result<impl IntoResponse, Fail> {
+    let machine_name = body.machine_name.trim();
+    if machine_name.is_empty() || machine_name.len() > 80 {
+        return Err(Fail::bad_request(
+            "machine name must be between 1 and 80 characters".into(),
+        ));
+    }
+    let authorization = app.store.start_device_authorization(machine_name)?;
+    Ok(Json(json!({
+        "deviceCode": authorization.device_code,
+        "userCode": authorization.user_code,
+        "expiresAt": authorization.expires_at,
+        "intervalSeconds": authorization.interval_seconds,
+        "verificationUri": std::env::var("REBEAM_DEVICE_URL")
+            .unwrap_or_else(|_| "rebeam://device".to_string()),
+    })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceApproveRequest {
+    user_code: String,
+}
+
+async fn approve_device_auth(
+    State(app): State<App>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<DeviceApproveRequest>,
+) -> Result<impl IntoResponse, Fail> {
+    let user = user_authenticated(&app, &headers)?;
+    if !app.store.approve_device(&body.user_code, &user.id)? {
+        return Err(Fail::bad_request(
+            "that device code is invalid, expired, or already used".into(),
+        ));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceTokenRequest {
+    device_code: String,
+}
+
+async fn poll_device_auth(
+    State(app): State<App>,
+    Json(body): Json<DeviceTokenRequest>,
+) -> Result<Response, Fail> {
+    let response = match app.store.poll_device_authorization(&body.device_code)? {
+        DevicePoll::Pending { interval_seconds } => (
+            StatusCode::ACCEPTED,
+            Json(json!({ "status": "pending", "intervalSeconds": interval_seconds })),
+        )
+            .into_response(),
+        DevicePoll::SlowDown { interval_seconds } => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "status": "slowDown", "intervalSeconds": interval_seconds })),
+        )
+            .into_response(),
+        DevicePoll::Authorized { token, machine } => (
+            StatusCode::OK,
+            Json(json!({ "status": "authorized", "token": token, "machine": machine })),
+        )
+            .into_response(),
+        DevicePoll::Expired => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "status": "expired", "error": "device code expired" })),
+        )
+            .into_response(),
+        DevicePoll::Invalid => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "status": "invalid", "error": "invalid device code" })),
+        )
+            .into_response(),
+    };
+    Ok(response)
 }
 
 async fn create_pairing(
@@ -166,7 +385,133 @@ async fn machines(
 ) -> Result<impl IntoResponse, Fail> {
     let workspace = user_authenticated(&app, &headers)?;
     let (count, online) = app.store.machine_status(&workspace.id)?;
-    Ok(Json(json!({ "count": count, "online": online })))
+    let machines = app.store.machines(&workspace.id)?;
+    Ok(Json(
+        json!({ "count": count, "online": online, "machines": machines }),
+    ))
+}
+
+#[derive(Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RuntimeInventoryRequest {
+    runtimes: Vec<RuntimeInventoryItem>,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RuntimeInventoryItem {
+    id: String,
+    label: String,
+    version: Option<String>,
+    availability: String,
+    auth: String,
+    adapter: String,
+    capabilities: RuntimeCapabilitySummary,
+    selected: bool,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RuntimeCapabilitySummary {
+    native_acp: bool,
+    adapter_backed: bool,
+    subscription_compatible: bool,
+    resumable_sessions: bool,
+    enforceable_tool_approvals: bool,
+    cancellation: bool,
+    model_switching: bool,
+    maximum_parallelism: u16,
+    execution_locus: String,
+}
+
+async fn report_runtime_inventory(
+    State(app): State<App>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<RuntimeInventoryRequest>,
+) -> Result<impl IntoResponse, Fail> {
+    let token = bearer_token(&headers)?;
+    machine_authenticated(&app, &headers)?;
+    validate_runtime_inventory(&body)?;
+    let encoded = serde_json::to_string(&body.runtimes)
+        .map_err(|_| Fail::bad_request("runtime inventory is invalid".into()))?;
+    if encoded.len() > 128 * 1_024 {
+        return Err(Fail::bad_request("runtime inventory is too large".into()));
+    }
+    if !app.store.update_runtime_inventory(token, &encoded)? {
+        return Err(Fail::unauthorized("machine credential is invalid".into()));
+    }
+    Ok(Json(json!({ "ok": true, "count": body.runtimes.len() })))
+}
+
+fn validate_runtime_inventory(body: &RuntimeInventoryRequest) -> Result<(), Fail> {
+    if body.runtimes.len() > 32 {
+        return Err(Fail::bad_request("too many runtime reports".into()));
+    }
+    let mut ids = HashSet::new();
+    let availability = [
+        "ready",
+        "loginRequired",
+        "adapterMissing",
+        "unsupportedVersion",
+        "configInvalid",
+        "notInstalled",
+        "probeFailed",
+    ];
+    let auth = [
+        "loggedIn",
+        "loginRequired",
+        "unknown",
+        "notApplicable",
+        "probeFailed",
+    ];
+    let adapter = ["ready", "missing", "notRequired", "unsupported"];
+    let locus = ["localProcess", "remoteDaemon", "externalService"];
+    for runtime in &body.runtimes {
+        let valid_id = !runtime.id.is_empty()
+            && runtime.id.len() <= 64
+            && runtime.id.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | ':')
+            });
+        if !valid_id || !ids.insert(runtime.id.as_str()) {
+            return Err(Fail::bad_request(
+                "runtime ids are invalid or duplicated".into(),
+            ));
+        }
+        if runtime.label.trim().is_empty()
+            || runtime.label.len() > 80
+            || runtime
+                .version
+                .as_ref()
+                .is_some_and(|value| value.len() > 200)
+            || !availability.contains(&runtime.availability.as_str())
+            || !auth.contains(&runtime.auth.as_str())
+            || !adapter.contains(&runtime.adapter.as_str())
+            || !locus.contains(&runtime.capabilities.execution_locus.as_str())
+            || runtime.capabilities.maximum_parallelism > 256
+        {
+            return Err(Fail::bad_request(
+                "runtime report contains invalid fields".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn revoke_machine(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Result<impl IntoResponse, Fail> {
+    let workspace = user_authenticated(&app, &headers)?;
+    if !app.store.revoke_machine(&workspace.id, &id)? {
+        return Err(Fail::not_found(format!("no machine {id:?}")));
+    }
+    broadcast_cancelled(
+        &app,
+        app.store
+            .cancel_approvals_for_machine(&id, "requesting machine was revoked")?,
+    );
+    Ok(Json(json!({ "ok": true })))
 }
 
 async fn heartbeat(
@@ -185,6 +530,38 @@ async fn me(State(app): State<App>, headers: axum::http::HeaderMap) -> Result<Js
         .user_for_token(token)?
         .map(Json)
         .ok_or_else(|| Fail::unauthorized("your session has expired".into()))
+}
+
+async fn machine_me(
+    State(app): State<App>,
+    headers: axum::http::HeaderMap,
+) -> Result<impl IntoResponse, Fail> {
+    let token = bearer_token(&headers)?;
+    let user = machine_authenticated(&app, &headers)?;
+    let machine = app
+        .store
+        .machine_for_credential(token)?
+        .ok_or_else(|| Fail::unauthorized("machine credential is invalid".into()))?;
+    Ok(Json(json!({ "user": user, "machine": machine })))
+}
+
+async fn machine_logout(
+    State(app): State<App>,
+    headers: axum::http::HeaderMap,
+) -> Result<impl IntoResponse, Fail> {
+    let token = bearer_token(&headers)?;
+    machine_authenticated(&app, &headers)?;
+    let machine = app
+        .store
+        .machine_for_credential(token)?
+        .ok_or_else(|| Fail::unauthorized("machine credential is invalid".into()))?;
+    app.store.revoke_machine_token(token)?;
+    broadcast_cancelled(
+        &app,
+        app.store
+            .cancel_approvals_for_machine(&machine.id, "requesting machine signed out")?,
+    );
+    Ok(Json(json!({ "ok": true })))
 }
 
 async fn logout(
@@ -287,6 +664,8 @@ struct NewChat {
     name: String,
     #[serde(default)]
     topic: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 async fn create_chat(
@@ -298,12 +677,18 @@ async fn create_chat(
     if body.name.trim().is_empty() {
         return Err(Fail::bad_request("a chat needs a name".into()));
     }
-    let chat = app.store.create_chat(
+    let mut chat = app.store.create_chat(
         body.name.trim(),
         body.topic.as_deref(),
         &user.id,
         now_millis(),
     )?;
+    if let Some(agent) = body.agent_id.as_deref() {
+        app.store
+            .attach_owned_agent(&chat.id, agent, &user.id, now_millis())?
+            .ok_or_else(|| Fail::bad_request("that local agent does not belong to you".into()))?;
+        chat.member_ids.push(agent.to_string());
+    }
     Ok(Json(chat))
 }
 
@@ -584,6 +969,15 @@ async fn kick(
         return Err(Fail::not_found(format!("{member:?} is not in that chat")));
     }
 
+    broadcast_cancelled(
+        &app,
+        app.store.cancel_approvals_for_agent_chat(
+            &member_id,
+            &chat,
+            "agent was removed from the chat",
+        )?,
+    );
+
     let _ = app.events.send(Event::SessionReset {
         chat: chat.clone(),
         member: member_id.clone(),
@@ -646,12 +1040,19 @@ async fn command(
     Json(mut cmd): Json<Command>,
 ) -> Result<impl IntoResponse, Fail> {
     let token = bearer_token(&headers)?;
-    let machine = app.store.machine_for_token(token)?;
-    let user = authenticated(&app, &headers)?;
-    if let Some(workspace) = machine {
+    broadcast_expired(&app)?;
+    let machine_owner = app.store.machine_for_token(token)?;
+    if let Some(workspace) = machine_owner {
+        let machine = app
+            .store
+            .machine_for_credential(token)?
+            .ok_or_else(|| Fail::unauthorized("machine credential is invalid".into()))?;
         match &mut cmd {
             Command::Send { chat, author, .. } | Command::Status { chat, author, .. } => {
-                let author_id = resolve_member(&app, author)?;
+                let author_id = app
+                    .store
+                    .find_agent_for_owner(author, &workspace.id)?
+                    .ok_or_else(|| Fail::not_found(format!("no member matching {author:?}")))?;
                 if !app.store.agent_belongs_to(&author_id, &workspace.id)? {
                     return Err(Fail::unauthorized(
                         "agent is not paired to this workspace".into(),
@@ -661,7 +1062,102 @@ async fn command(
                 *chat = chat_id;
                 *author = author_id;
             }
-            _ => {
+            Command::RequestApproval {
+                agent,
+                chat,
+                run,
+                tool_call,
+                provider,
+                tool,
+                display,
+                input_digest,
+                expires_in_ms,
+            } => {
+                let agent_id = app
+                    .store
+                    .find_agent_for_owner(agent, &workspace.id)?
+                    .ok_or_else(|| Fail::not_found(format!("no member matching {agent:?}")))?;
+                if !app.store.agent_belongs_to(&agent_id, &workspace.id)? {
+                    return Err(Fail::unauthorized(
+                        "agent is not paired to this workspace".into(),
+                    ));
+                }
+                let chat_id = resolve_chat_for(&app, chat, &agent_id)?;
+                validate_approval_request(
+                    run,
+                    tool_call,
+                    provider,
+                    tool,
+                    display,
+                    input_digest,
+                    *expires_in_ms,
+                )?;
+                let expires_at = now_millis().saturating_add(*expires_in_ms);
+                let outcome = app.store.create_approval(
+                    &workspace.id,
+                    &machine.id,
+                    &agent_id,
+                    &chat_id,
+                    run,
+                    tool_call,
+                    provider,
+                    tool,
+                    display,
+                    input_digest,
+                    expires_at,
+                )?;
+                return match outcome {
+                    ApprovalCreate::Created(approval) => {
+                        let event = Event::ApprovalRequested {
+                            approval: approval.clone(),
+                        };
+                        let _ = app.events.send(event.clone());
+                        // Room members learn only that the agent is paused;
+                        // tool details and the action remain owner-scoped.
+                        let _ = app.events.send(Event::Status {
+                            chat: approval.chat_id.clone(),
+                            author: approval.agent_id.clone(),
+                            state: StatusState::Thinking,
+                            label: Some("Waiting for owner approval".into()),
+                            tool: None,
+                            target: None,
+                        });
+                        schedule_approval_expiry(app.clone(), approval.expires_at);
+                        Ok(Json(event))
+                    }
+                    ApprovalCreate::Existing(approval) => {
+                        Ok(Json(Event::ApprovalRequested { approval }))
+                    }
+                    ApprovalCreate::Conflict => Err(Fail::conflict(
+                        "that tool-call id was already used with different input".into(),
+                    )),
+                    ApprovalCreate::TooMany => Err(Fail::too_many(
+                        "this machine already has 100 pending approvals".into(),
+                    )),
+                };
+            }
+            Command::CancelApproval { approval, reason } => {
+                validate_text("cancellation reason", reason, 200)?;
+                return match app.store.cancel_approval(approval, &machine.id, reason)? {
+                    ApprovalTransition::Updated(approval) => {
+                        let event = Event::ApprovalResolved { approval };
+                        let _ = app.events.send(event.clone());
+                        Ok(Json(event))
+                    }
+                    ApprovalTransition::NotFound => {
+                        Err(Fail::not_found("no matching approval".into()))
+                    }
+                    ApprovalTransition::NotPending => {
+                        Err(Fail::conflict("approval is already terminal".into()))
+                    }
+                    ApprovalTransition::Expired(approval) => {
+                        let _ = app.events.send(Event::ApprovalExpired { approval });
+                        Err(Fail::conflict("approval expired".into()))
+                    }
+                    ApprovalTransition::DigestMismatch(_) => unreachable!(),
+                };
+            }
+            Command::ResolveApproval { .. } | Command::Ask { .. } | Command::Resolve { .. } => {
                 return Err(Fail::unauthorized(
                     "machine credentials may only act as their paired agent".into(),
                 ))
@@ -671,6 +1167,7 @@ async fn command(
         let _ = app.events.send(event.clone());
         return Ok(Json(event));
     }
+    let user = user_authenticated(&app, &headers)?;
     match &mut cmd {
         Command::Send { chat, author, .. } | Command::Ask { chat, author, .. } => {
             let chat_id = resolve_chat_for(&app, chat, &user.id)?;
@@ -690,6 +1187,44 @@ async fn command(
         Command::Status { .. } => {
             return Err(Fail::bad_request(
                 "agent status is not available for user sessions".into(),
+            ))
+        }
+        Command::ResolveApproval {
+            approval,
+            decision,
+            input_digest,
+        } => {
+            if !valid_digest(input_digest) {
+                return Err(Fail::bad_request("input digest must be SHA-256 hex".into()));
+            }
+            return match app
+                .store
+                .resolve_approval(approval, &user.id, *decision, input_digest)?
+            {
+                ApprovalTransition::Updated(approval) => {
+                    let event = Event::ApprovalResolved { approval };
+                    let _ = app.events.send(event.clone());
+                    Ok(Json(event))
+                }
+                ApprovalTransition::Expired(approval) => {
+                    let _ = app.events.send(Event::ApprovalExpired { approval });
+                    Err(Fail::conflict("approval expired".into()))
+                }
+                ApprovalTransition::DigestMismatch(approval) => {
+                    let _ = app.events.send(Event::ApprovalResolved { approval });
+                    Err(Fail::conflict(
+                        "approval input changed; request denied closed".into(),
+                    ))
+                }
+                ApprovalTransition::NotPending => {
+                    Err(Fail::conflict("approval is already terminal".into()))
+                }
+                ApprovalTransition::NotFound => Err(Fail::not_found("no matching approval".into())),
+            };
+        }
+        Command::RequestApproval { .. } | Command::CancelApproval { .. } => {
+            return Err(Fail::unauthorized(
+                "only a paired machine may manage provider requests".into(),
             ))
         }
     }
@@ -767,6 +1302,143 @@ fn apply(app: &App, cmd: Command) -> Result<Event, Fail> {
                 target,
             })
         }
+
+        Command::RequestApproval { .. }
+        | Command::ResolveApproval { .. }
+        | Command::CancelApproval { .. } => Err(Fail::internal(
+            "approval commands must be authorized before application".into(),
+        )),
+    }
+}
+
+async fn approvals(
+    State(app): State<App>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<Vec<Approval>>, Fail> {
+    let owner = user_authenticated(&app, &headers)?;
+    broadcast_expired(&app)?;
+    Ok(Json(app.store.approvals_for_owner(&owner.id)?))
+}
+
+async fn approval(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<Approval>, Fail> {
+    let token = bearer_token(&headers)?;
+    broadcast_expired(&app)?;
+    if let Some(owner) = app.store.user_for_token(token)? {
+        return app
+            .store
+            .approval_for_owner(&id, &owner.id)?
+            .map(Json)
+            .ok_or_else(|| Fail::not_found("no matching approval".into()));
+    }
+    if app.store.machine_for_token(token)?.is_some() {
+        let machine = app
+            .store
+            .machine_for_credential(token)?
+            .ok_or_else(|| Fail::unauthorized("machine credential is invalid".into()))?;
+        return app
+            .store
+            .approval_for_machine(&id, &machine.id)?
+            .map(Json)
+            .ok_or_else(|| Fail::not_found("no matching approval".into()));
+    }
+    Err(Fail::unauthorized("your session has expired".into()))
+}
+
+fn validate_approval_request(
+    run: &str,
+    tool_call: &str,
+    provider: &str,
+    tool: &str,
+    display: &rebeam_core::ApprovalDisplay,
+    digest: &str,
+    expires_in_ms: i64,
+) -> Result<(), Fail> {
+    validate_identifier("run id", run, 128)?;
+    validate_identifier("tool-call id", tool_call, 128)?;
+    validate_text("provider", provider, 64)?;
+    validate_text("tool", tool, 80)?;
+    validate_text("approval summary", &display.summary, 500)?;
+    for (name, value, max) in [
+        ("project", display.project.as_deref(), 300),
+        ("target", display.target.as_deref(), 500),
+        ("command preview", display.command.as_deref(), 1_000),
+    ] {
+        if let Some(value) = value {
+            validate_text(name, value, max)?;
+        }
+    }
+    if !valid_digest(digest) {
+        return Err(Fail::bad_request("input digest must be SHA-256 hex".into()));
+    }
+    if !(1_000..=24 * 60 * 60 * 1_000).contains(&expires_in_ms) {
+        return Err(Fail::bad_request(
+            "approval expiry must be between 1 second and 24 hours".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_identifier(name: &str, value: &str, max: usize) -> Result<(), Fail> {
+    validate_text(name, value, max)?;
+    if !value
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || "-_.:".contains(character))
+    {
+        return Err(Fail::bad_request(format!(
+            "{name} contains invalid characters"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_text(name: &str, value: &str, max: usize) -> Result<(), Fail> {
+    let unsafe_character = |character: char| {
+        character.is_control()
+            || matches!(character, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+    };
+    if value.trim().is_empty() || value.len() > max || value.chars().any(unsafe_character) {
+        return Err(Fail::bad_request(format!("{name} is invalid")));
+    }
+    Ok(())
+}
+
+fn valid_digest(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn broadcast_expired(app: &App) -> Result<(), Fail> {
+    for approval in app.store.expire_approvals()? {
+        let _ = app.events.send(Event::ApprovalExpired { approval });
+    }
+    Ok(())
+}
+
+fn broadcast_cancelled(app: &App, approvals: Vec<Approval>) {
+    for approval in approvals {
+        let _ = app.events.send(Event::ApprovalResolved { approval });
+    }
+}
+
+fn schedule_approval_expiry(app: App, expires_at: i64) {
+    tokio::spawn(async move {
+        let delay = expires_at.saturating_sub(now_millis()) as u64;
+        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+        let _ = broadcast_expired(&app);
+    });
+}
+
+async fn expiry_sweeper(app: App) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        interval.tick().await;
+        if let Err(error) = broadcast_expired(&app) {
+            eprintln!("approval expiry sweep failed: {}", error.message);
+        }
     }
 }
 
@@ -825,37 +1497,76 @@ struct StreamQuery {
     token: String,
 }
 
+#[derive(Clone)]
+enum ConnectionIdentity {
+    Human(User),
+    Machine { owner: User, machine: MachineRecord },
+}
+
+impl ConnectionIdentity {
+    fn member_id(&self) -> &str {
+        match self {
+            Self::Human(user) => &user.id,
+            Self::Machine { owner, .. } => &owner.id,
+        }
+    }
+
+    fn can_receive_approval(&self, approval: &Approval) -> bool {
+        match self {
+            Self::Human(user) => approval.owner_id == user.id,
+            Self::Machine { machine, .. } => approval.machine_id == machine.id,
+        }
+    }
+}
+
 async fn stream(
     ws: WebSocketUpgrade,
     State(app): State<App>,
     axum::extract::Query(query): axum::extract::Query<StreamQuery>,
 ) -> Result<Response, Fail> {
-    let user = app
-        .store
-        .user_for_token(&query.token)?
-        .or(app.store.machine_for_token(&query.token)?)
-        .ok_or_else(|| Fail::unauthorized("your session has expired".into()))?;
-    Ok(ws.on_upgrade(move |socket| pump(socket, app, user)))
+    let identity = if let Some(user) = app.store.user_for_token(&query.token)? {
+        ConnectionIdentity::Human(user)
+    } else if let Some(owner) = app.store.machine_for_token(&query.token)? {
+        let machine = app
+            .store
+            .machine_for_credential(&query.token)?
+            .ok_or_else(|| Fail::unauthorized("machine credential is invalid".into()))?;
+        ConnectionIdentity::Machine { owner, machine }
+    } else {
+        return Err(Fail::unauthorized("your session has expired".into()));
+    };
+    Ok(ws.on_upgrade(move |socket| pump(socket, app, identity, query.token)))
 }
 
 /// One task per connected client: forward every event for as long as it lives.
-async fn pump(socket: WebSocket, app: App, user: User) {
+async fn pump(socket: WebSocket, app: App, identity: ConnectionIdentity, token: String) {
     let (mut tx, mut rx) = socket.split();
     let mut events = app.events.subscribe();
+    let mut auth_check = tokio::time::interval(std::time::Duration::from_secs(30));
+    auth_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // `interval` ticks immediately once. Authentication was just checked by
+    // the handshake, so begin the recurring checks 30 seconds from now.
+    auth_check.tick().await;
 
-    let send = tokio::spawn(async move {
-        loop {
-            match events.recv().await {
+    loop {
+        tokio::select! {
+            event = events.recv() => match event {
                 Ok(event) => {
-                    let chat = match &event {
-                        Event::Message { message } | Event::MessageUpdated { message } => {
-                            &message.channel_id
+                    let permitted = match &event {
+                        Event::ApprovalRequested { approval }
+                        | Event::ApprovalResolved { approval }
+                        | Event::ApprovalExpired { approval } => {
+                            identity.can_receive_approval(approval)
                         }
-                        Event::ChatUpdated { chat } => &chat.id,
-                        Event::Status { chat, .. } => chat,
-                        Event::SessionReset { chat, .. } => chat,
+                        Event::Message { message } | Event::MessageUpdated { message } => {
+                            app.store.is_member_of_chat(&message.channel_id, identity.member_id()).unwrap_or(false)
+                        }
+                        Event::ChatUpdated { chat } => app.store.is_member_of_chat(&chat.id, identity.member_id()).unwrap_or(false),
+                        Event::Status { chat, .. } | Event::SessionReset { chat, .. } => {
+                            app.store.is_member_of_chat(chat, identity.member_id()).unwrap_or(false)
+                        }
                     };
-                    if !app.store.is_member_of_chat(chat, &user.id).unwrap_or(false) {
+                    if !permitted {
                         continue;
                     }
                     let Ok(text) = serde_json::to_string(&event) else {
@@ -869,17 +1580,30 @@ async fn pump(socket: WebSocket, app: App, user: User) {
                 // connection; it resyncs on its next fetch.
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => break,
+            },
+            message = rx.next() => match message {
+                Some(Ok(WsMessage::Close(_))) | None | Some(Err(_)) => break,
+                _ => {}
+            },
+            _ = auth_check.tick() => {
+                let valid = match &identity {
+                    ConnectionIdentity::Human(_) => app.store.user_for_token(&token).ok().flatten().is_some(),
+                    ConnectionIdentity::Machine { machine, .. } => app.store
+                        .machine_for_credential(&token)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|current| current.id == machine.id),
+                };
+                if !valid {
+                    let _ = tx.send(WsMessage::Close(Some(CloseFrame {
+                        code: close_code::POLICY,
+                        reason: "session expired or revoked".into(),
+                    }))).await;
+                    break;
+                }
             }
         }
-    });
-
-    // Commands don't come over the socket yet — HTTP is the write path.
-    while let Some(Ok(msg)) = rx.next().await {
-        if matches!(msg, WsMessage::Close(_)) {
-            break;
-        }
     }
-    send.abort();
 }
 
 // ---------------------------------------------------------------------------
@@ -915,6 +1639,27 @@ impl Fail {
             message,
         }
     }
+
+    fn conflict(message: String) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            message,
+        }
+    }
+
+    fn too_many(message: String) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message,
+        }
+    }
+
+    fn internal(message: String) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message,
+        }
+    }
 }
 
 impl From<rusqlite::Error> for Fail {
@@ -935,8 +1680,18 @@ impl IntoResponse for Fail {
 #[cfg(test)]
 mod security_tests {
     use super::*;
-    use axum::{body::Body, http::Request};
+    use axum::{
+        body::{to_bytes, Body},
+        http::Request,
+    };
     use tower::ServiceExt;
+
+    #[test]
+    fn bootstrap_is_off_in_release_unless_explicitly_enabled() {
+        assert!(!bootstrap_enabled_for(None, false));
+        assert!(!bootstrap_enabled_for(Some("0"), true));
+        assert!(bootstrap_enabled_for(Some("1"), false));
+    }
 
     struct Fixture {
         app: Router,
@@ -1040,6 +1795,285 @@ mod security_tests {
             builder = builder.header(header::CONTENT_TYPE, "application/json");
         }
         builder.body(Body::from(body.to_owned())).unwrap()
+    }
+
+    fn isolated_app() -> Router {
+        let store = Arc::new(Store::open(":memory:").unwrap());
+        let (events, _) = broadcast::channel(32);
+        router(App { store, events })
+    }
+
+    async fn response_json(response: Response) -> serde_json::Value {
+        let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn account_sessions_register_login_refresh_and_revoke() {
+        let app = isolated_app();
+        let registered = app
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/auth/register",
+                None,
+                r#"{"email":"Person@Example.com","name":"Person","password":"long enough password"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(registered.status(), StatusCode::OK);
+        let registered = response_json(registered).await;
+        let first_token = registered["token"].as_str().unwrap();
+        let refresh_token = registered["refreshToken"].as_str().unwrap();
+
+        let me = app
+            .clone()
+            .oneshot(request(Method::GET, "/auth/me", Some(first_token), ""))
+            .await
+            .unwrap();
+        assert_eq!(me.status(), StatusCode::OK);
+
+        let wrong_password = app
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/auth/login",
+                None,
+                r#"{"email":"person@example.com","password":"incorrect password"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(wrong_password.status(), StatusCode::UNAUTHORIZED);
+
+        let refreshed = app
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/auth/refresh",
+                None,
+                &serde_json::json!({ "refreshToken": refresh_token }).to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(refreshed.status(), StatusCode::OK);
+        let refreshed = response_json(refreshed).await;
+        let second_token = refreshed["token"].as_str().unwrap();
+        assert_ne!(first_token, second_token);
+
+        let old_session = app
+            .clone()
+            .oneshot(request(Method::GET, "/auth/me", Some(first_token), ""))
+            .await
+            .unwrap();
+        assert_eq!(old_session.status(), StatusCode::UNAUTHORIZED);
+
+        let logout = app
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/auth/logout",
+                Some(second_token),
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(logout.status(), StatusCode::OK);
+        let revoked = app
+            .oneshot(request(Method::GET, "/auth/me", Some(second_token), ""))
+            .await
+            .unwrap();
+        assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn device_flow_binds_machine_to_approver_and_owner_can_revoke_it() {
+        let app = isolated_app();
+        let owner = app
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/auth/register",
+                None,
+                r#"{"email":"owner@example.com","name":"Owner","password":"owner password"}"#,
+            ))
+            .await
+            .unwrap();
+        let owner = response_json(owner).await;
+        let owner_token = owner["token"].as_str().unwrap();
+
+        let outsider = app
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/auth/register",
+                None,
+                r#"{"email":"outsider@example.com","name":"Outsider","password":"outsider password"}"#,
+            ))
+            .await
+            .unwrap();
+        let outsider = response_json(outsider).await;
+        let outsider_token = outsider["token"].as_str().unwrap();
+
+        let started = app
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/auth/device/start",
+                None,
+                r#"{"machineName":"Build Mac"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(started.status(), StatusCode::OK);
+        let started = response_json(started).await;
+
+        let approved = app
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/auth/device/approve",
+                Some(owner_token),
+                &serde_json::json!({ "userCode": started["userCode"] }).to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(approved.status(), StatusCode::OK);
+
+        let authorized = app
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/auth/device/token",
+                None,
+                &serde_json::json!({ "deviceCode": started["deviceCode"] }).to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(authorized.status(), StatusCode::OK);
+        let authorized = response_json(authorized).await;
+        let machine_token = authorized["token"].as_str().unwrap();
+        let machine_id = authorized["machine"]["id"].as_str().unwrap();
+
+        let machine_me = app
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                "/auth/machine",
+                Some(machine_token),
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(machine_me.status(), StatusCode::OK);
+        let machine_me = response_json(machine_me).await;
+        assert_eq!(machine_me["user"]["email"], "owner@example.com");
+
+        let inventory = serde_json::json!({
+            "runtimes": [{
+                "id": "claude",
+                "label": "Claude Code",
+                "version": "2.0.0",
+                "availability": "ready",
+                "auth": "loggedIn",
+                "adapter": "ready",
+                "capabilities": {
+                    "nativeAcp": false,
+                    "adapterBacked": true,
+                    "subscriptionCompatible": true,
+                    "resumableSessions": true,
+                    "enforceableToolApprovals": true,
+                    "cancellation": true,
+                    "modelSwitching": true,
+                    "maximumParallelism": 1,
+                    "executionLocus": "localProcess"
+                },
+                "selected": true
+            }]
+        })
+        .to_string();
+        let reported = app
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/machines/runtimes",
+                Some(machine_token),
+                &inventory,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(reported.status(), StatusCode::OK);
+
+        let mut leaked_inventory: serde_json::Value = serde_json::from_str(&inventory).unwrap();
+        leaked_inventory["runtimes"][0]["binaryPath"] = json!("/private/project/provider");
+        let leaked = app
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/machines/runtimes",
+                Some(machine_token),
+                &leaked_inventory.to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(leaked.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let human_cannot_report = app
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/machines/runtimes",
+                Some(owner_token),
+                &inventory,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(human_cannot_report.status(), StatusCode::UNAUTHORIZED);
+
+        let owner_machines = app
+            .clone()
+            .oneshot(request(Method::GET, "/machines", Some(owner_token), ""))
+            .await
+            .unwrap();
+        let owner_machines = response_json(owner_machines).await;
+        assert_eq!(owner_machines["machines"][0]["runtimes"][0]["id"], "claude");
+        assert!(owner_machines["machines"][0]["runtimes"][0]
+            .get("binaryPath")
+            .is_none());
+
+        let outsider_revoke = app
+            .clone()
+            .oneshot(request(
+                Method::DELETE,
+                &format!("/machines/{machine_id}"),
+                Some(outsider_token),
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(outsider_revoke.status(), StatusCode::NOT_FOUND);
+
+        let owner_revoke = app
+            .clone()
+            .oneshot(request(
+                Method::DELETE,
+                &format!("/machines/{machine_id}"),
+                Some(owner_token),
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(owner_revoke.status(), StatusCode::OK);
+
+        let revoked_machine = app
+            .oneshot(request(
+                Method::GET,
+                "/auth/machine",
+                Some(machine_token),
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(revoked_machine.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
@@ -1162,6 +2196,190 @@ mod security_tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn tool_approvals_are_owner_and_exact_machine_scoped() {
+        let f = fixture();
+        let digest = "a".repeat(64);
+        let opened = f
+            .app
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/commands",
+                Some(&f.machine_a),
+                &json!({
+                    "t": "requestApproval",
+                    "agent": f.agent_a,
+                    "chat": f.chat_a,
+                    "run": "run-e2e",
+                    "toolCall": "call-e2e",
+                    "provider": "fake",
+                    "tool": "FakeWrite",
+                    "display": { "summary": "Write fixture?", "target": "fixture.txt" },
+                    "inputDigest": digest,
+                    "expiresInMs": 60_000
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(opened.status(), StatusCode::OK);
+        let opened = response_json(opened).await;
+        let approval_id = opened["approval"]["id"].as_str().unwrap();
+
+        for (token, expected) in [
+            (&f.user_b, StatusCode::NOT_FOUND),
+            (&f.machine_b, StatusCode::NOT_FOUND),
+        ] {
+            let hidden = f
+                .app
+                .clone()
+                .oneshot(request(
+                    Method::GET,
+                    &format!("/approvals/{approval_id}"),
+                    Some(token),
+                    "",
+                ))
+                .await
+                .unwrap();
+            assert_eq!(hidden.status(), expected);
+        }
+
+        let outsider_list = f
+            .app
+            .clone()
+            .oneshot(request(Method::GET, "/approvals", Some(&f.user_b), ""))
+            .await
+            .unwrap();
+        assert_eq!(response_json(outsider_list).await, json!([]));
+
+        let wrong_owner = f
+            .app
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/commands",
+                Some(&f.user_b),
+                &json!({
+                    "t": "resolveApproval",
+                    "approval": approval_id,
+                    "decision": "allowOnce",
+                    "inputDigest": digest
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(wrong_owner.status(), StatusCode::NOT_FOUND);
+
+        let allowed = f
+            .app
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/commands",
+                Some(&f.user_a),
+                &json!({
+                    "t": "resolveApproval",
+                    "approval": approval_id,
+                    "decision": "allowOnce",
+                    "inputDigest": digest
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(allowed.status(), StatusCode::OK);
+        assert_eq!(response_json(allowed).await["approval"]["state"], "allowed");
+
+        let duplicate = f
+            .app
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/commands",
+                Some(&f.user_a),
+                &json!({
+                    "t": "resolveApproval",
+                    "approval": approval_id,
+                    "decision": "allowOnce",
+                    "inputDigest": digest
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+
+        let machine_recovery = f
+            .app
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                &format!("/approvals/{approval_id}"),
+                Some(&f.machine_a),
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(machine_recovery.status(), StatusCode::OK);
+        assert_eq!(response_json(machine_recovery).await["state"], "allowed");
+    }
+
+    #[test]
+    fn approval_push_details_route_only_to_owner_and_requesting_machine() {
+        let approval = Approval {
+            id: "apr_1".into(),
+            owner_id: "u_owner".into(),
+            machine_id: "machine_owner".into(),
+            agent_id: "a_agent".into(),
+            chat_id: "g_shared".into(),
+            run_id: "run_1".into(),
+            tool_call_id: "call_1".into(),
+            provider: "fake".into(),
+            tool: "FakeWrite".into(),
+            display: rebeam_core::ApprovalDisplay {
+                summary: "Write fixture?".into(),
+                project: None,
+                target: Some("fixture.txt".into()),
+                command: None,
+            },
+            input_digest: "a".repeat(64),
+            state: rebeam_core::ApprovalState::Pending,
+            expires_at: 10,
+            created_at: 0,
+            resolved_at: None,
+            resolved_by: None,
+            resolution_reason: None,
+        };
+        let user = |id: &str| User {
+            id: id.into(),
+            email: format!("{id}@example.com"),
+            name: id.into(),
+        };
+        let machine = |id: &str| MachineRecord {
+            id: id.into(),
+            name: id.into(),
+            created_at: 0,
+            last_seen: None,
+            online: true,
+            runtimes: vec![],
+            runtime_updated_at: None,
+        };
+        assert!(ConnectionIdentity::Human(user("u_owner")).can_receive_approval(&approval));
+        assert!(!ConnectionIdentity::Human(user("u_room_member")).can_receive_approval(&approval));
+        assert!(ConnectionIdentity::Machine {
+            owner: user("u_owner"),
+            machine: machine("machine_owner"),
+        }
+        .can_receive_approval(&approval));
+        assert!(!ConnectionIdentity::Machine {
+            owner: user("u_owner"),
+            machine: machine("machine_other"),
+        }
+        .can_receive_approval(&approval));
     }
 
     #[tokio::test]

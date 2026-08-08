@@ -97,22 +97,19 @@ onward (the first creates the session).
 ## Permission / tools
 
 Headless `claude -p` has no one to approve tools, so a gated tool dead-ends
-("please approve"). Current stopgap: **`--dangerously-skip-permissions`** so the
-agent runs its tools — fine for *your own agent on your own machine*, NOT for
-lent/shared agents.
+("please approve"). Rebeam now keeps Claude in `default` permission mode and
+fails closed. It does not add `--dangerously-skip-permissions`.
 
 - Buzz **refuses** an unattended full-bypass (there's a test enforcing it). They
   use ACP permission **modes** (`default`/`acceptEdits`/`dontAsk`/`plan`) + the
   agent's own sandbox. But `acceptEdits` still gates Bash → wouldn't run a shell
   command headless, which is why Buzz's default runtime is Goose, not Claude.
-- **The real fix / the moat:** the **approval card**. Don't skip permissions —
-  let the agent hit a real `session/request_permission`, route it to the human
-  ("claude-1 wants to run `node …` — Approve?"), resume on the tap. For a
-  **lent** agent, the approval routes to the *owner's* phone (the cross-user
-  sharing safety story). This is exactly the gate Buzz **couldn't** build (their
-  workflow-approval is a stub). Plumbing to reuse: ACP `request_permission`
-  `options[]` (`allow_once`/`allow_always`/`reject_once`/`reject_always`) +
-  Buzz's `WorkflowApprovalCard.tsx` UX (token-keyed, note field, self-expiring).
+- **The approval vertical slice is implemented:** native ACP permission calls
+  pause in the local broker, route an owner-only card, and resume only one
+  exact matching call after **Allow once**. Claude's print-mode path uses the
+  same private `--permission-prompt-tool` MCP bridge.
+  A **lent** agent's request routes to its owner's session, not to everyone in
+  the room. This is the gate Buzz's workflow approval never enforced.
 
 `--strict-mcp-config` is also passed to the adapter, so the agent does **not**
 inherit the user's personal MCP servers (reminders/calendar/contacts) — those
@@ -132,14 +129,11 @@ trigger macOS TCC prompts attributed to `rebeam`.
 
 ## Open items / next
 
-1. **Approval card** (the moat) — `request_permission` → `rebeam ask` → app card
-   → resume. Per-agent policy: `trusted` (auto-allow, today's behaviour) vs
-   `ask` (route to owner). Turn off blanket skip-permissions.
-2. **Long-lived adapter + session reuse** (Buzz's pool model) if spawn latency
+1. **Long-lived adapter + session reuse** (Buzz's pool model) if spawn latency
    or model re-init becomes a bottleneck.
-3. **Persona file** (`.persona.md`: frontmatter + markdown-as-system-prompt,
+2. **Persona file** (`.persona.md`: frontmatter + markdown-as-system-prompt,
    `runtime`/`model`/`triggers`) instead of piling flags onto `connect`.
-4. **Codex/Gemini** adapters via the resolver (already wired; untested).
+3. **Codex/Gemini** adapters via the resolver (already wired; untested).
 
 ## CLI reference
 

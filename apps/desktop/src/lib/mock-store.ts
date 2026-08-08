@@ -1,4 +1,6 @@
 import type {
+  Approval,
+  ApprovalDecision,
   Channel,
   HistoryGrant,
   Invite,
@@ -210,6 +212,10 @@ export class MockStore implements Store {
       .sort((a, b) => a.createdAt - b.createdAt);
   }
 
+  async listApprovals() {
+    return [];
+  }
+
   async sendMessage(channelId: string, text: string) {
     const message: Message = {
       id: `m_${crypto.randomUUID().slice(0, 8)}`,
@@ -239,6 +245,14 @@ export class MockStore implements Store {
       );
     }
     return message;
+  }
+
+  async resolveApproval(
+    _approvalId: string,
+    _decision: ApprovalDecision,
+    _inputDigest: string,
+  ): Promise<Approval> {
+    throw new Error("tool approvals require the authenticated relay");
   }
 
   async updateChannel(channelId: string, patch: Partial<Channel>): Promise<Channel> {

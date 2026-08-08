@@ -1,5 +1,7 @@
 import { create } from "zustand";
 import type {
+  Approval,
+  ApprovalDecision,
   Channel,
   Member,
   HistoryGrant,
@@ -23,6 +25,7 @@ interface ChatState {
   channels: Channel[];
   members: Member[];
   messages: Message[];
+  approvals: Approval[];
   activeChannelId: string | null;
   inviteOpen: boolean;
   newChatOpen: boolean;
@@ -58,9 +61,10 @@ interface ChatState {
   selectChannel(channelId: string): Promise<void>;
   send(text: string): Promise<void>;
   resolveAsk(messageId: string, option: string): Promise<void>;
+  resolveApproval(approvalId: string, decision: ApprovalDecision): Promise<void>;
   setInviteOpen(open: boolean): void;
   setNewChatOpen(open: boolean): void;
-  createChannel(name: string, topic?: string): Promise<Channel>;
+  createChannel(name: string, topic?: string, agentId?: string): Promise<Channel>;
   kickMember(channelId: string, memberId: string): Promise<void>;
   resetAgentSession(channelId: string, memberId: string): Promise<void>;
   setCaddyOpen(open: boolean): void;
@@ -81,6 +85,7 @@ export const useChat = create<ChatState>((set, get) => ({
   channels: [],
   members: [],
   messages: [],
+  approvals: [],
   activeChannelId: null,
   inviteOpen: false,
   newChatOpen: false,
@@ -102,29 +107,39 @@ export const useChat = create<ChatState>((set, get) => ({
   turns: {},
 
   async initAuth() {
-    const user = await auth.currentUser().catch(() => null) ?? await auth.bootstrap();
-    const machines = await auth.machineCount().catch(() => ({ count: 0, online: 0 }));
-    set({ user, machineCount: machines.count, machineOnline: machines.online, authed: true, authReady: true });
+    const user = await auth.currentUser().catch(() => null);
+    const machines = user
+      ? await auth.machineStatus().catch(() => ({ count: 0, online: 0, machines: [] }))
+      : { count: 0, online: 0, machines: [] };
+    set({
+      user,
+      machineCount: machines.count,
+      machineOnline: machines.online,
+      authed: user != null,
+      authReady: true,
+    });
   },
 
   async refreshMachines() {
-    const machines = await auth.machineCount().catch(() => ({ count: 0, online: 0 }));
+    const machines = await auth.machineStatus().catch(() => ({ count: 0, online: 0, machines: [] }));
     set({ machineCount: machines.count, machineOnline: machines.online });
   },
 
-  async signIn(_email, _password) {
-    const user = await auth.bootstrap();
+  async signIn(email, password) {
+    const user = await auth.login(email, password);
     set({ user, authed: true });
   },
 
-  async register(_name, _email, _password) {
-    const user = await auth.bootstrap();
+  async register(name, email, password) {
+    const user = await auth.register(name, email, password);
     set({ user, authed: true });
   },
 
   async signOut() {
+    if (store instanceof LiveStore) store.close();
     await auth.logout();
-    set({ user: null, authed: false, channels: [], messages: [], activeChannelId: null });
+    store = new MockStore();
+    set({ user: null, authed: false, channels: [], messages: [], approvals: [], activeChannelId: null });
   },
 
   async init() {
@@ -139,9 +154,10 @@ export const useChat = create<ChatState>((set, get) => ({
       set({ relay: "mock" });
     }
 
-    const [channels, members] = await Promise.all([
+    const [channels, members, approvals] = await Promise.all([
       store.listChannels(),
       store.listMembers(),
+      store.listApprovals(),
     ]);
     // restore user's saved channel order
     try {
@@ -156,7 +172,7 @@ export const useChat = create<ChatState>((set, get) => ({
     } catch {
       // ignore corrupt saved order
     }
-    set({ channels, members });
+    set({ channels, members, approvals });
     store.subscribe((event) => {
       const { activeChannelId, messages } = get();
       if (event.type === "message") {
@@ -258,6 +274,24 @@ export const useChat = create<ChatState>((set, get) => ({
           ),
         });
       }
+      if (
+        event.type === "approval.requested" ||
+        event.type === "approval.resolved" ||
+        event.type === "approval.expired"
+      ) {
+        const approvals = get().approvals;
+        const index = approvals.findIndex(
+          (approval) => approval.id === event.approval.id,
+        );
+        set({
+          approvals:
+            index === -1
+              ? [...approvals, event.approval]
+              : approvals.map((approval) =>
+                  approval.id === event.approval.id ? event.approval : approval,
+                ),
+        });
+      }
     });
     const first = channels[0];
     if (first) await get().selectChannel(first.id);
@@ -289,6 +323,21 @@ export const useChat = create<ChatState>((set, get) => ({
     await store.resolveAsk(messageId, option);
   },
 
+  async resolveApproval(approvalId, decision) {
+    const approval = get().approvals.find((item) => item.id === approvalId);
+    if (!approval || approval.state !== "pending") return;
+    const updated = await store.resolveApproval(
+      approval.id,
+      decision,
+      approval.inputDigest,
+    );
+    set({
+      approvals: get().approvals.map((item) =>
+        item.id === updated.id ? updated : item,
+      ),
+    });
+  },
+
   setInviteOpen(open) {
     set({ inviteOpen: open });
   },
@@ -297,8 +346,8 @@ export const useChat = create<ChatState>((set, get) => ({
     set({ newChatOpen: open });
   },
 
-  async createChannel(name, topic) {
-    const channel = await store.createChannel(name, topic);
+  async createChannel(name, topic, agentId) {
+    const channel = await store.createChannel(name, topic, agentId);
     set({ channels: [...get().channels, channel] });
     await get().selectChannel(channel.id);
     return channel;

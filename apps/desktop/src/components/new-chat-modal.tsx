@@ -18,8 +18,8 @@ import { useChat } from "@/lib/use-chat";
  * connected during onboarding.
  */
 export function NewChatModal() {
-  const { newChatOpen, setNewChatOpen, createChannel, setInviteOpen } =
-    useChat();
+  const { newChatOpen, setNewChatOpen, createChannel, members } = useChat();
+  const agents = members.filter((member) => member.type === "agent");
   const [name, setName] = useState("");
   const [topic, setTopic] = useState("");
   const [busy, setBusy] = useState(false);
@@ -38,10 +38,8 @@ export function NewChatModal() {
     setBusy(true);
     setError(null);
     try {
-      await createChannel(name.trim(), topic.trim() || undefined);
+      await createChannel(name.trim(), topic.trim() || undefined, agents[0]?.id);
       setNewChatOpen(false);
-      // A brand-new group is empty, so inviting is the only thing left to do.
-      setInviteOpen(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -55,7 +53,7 @@ export function NewChatModal() {
         <DialogHeader>
           <DialogTitle>Start a chat</DialogTitle>
           <DialogDescription>
-            Give your agent chat a name. You’ll connect one agent next.
+            Give your agent chat a name. Your local agent will be attached automatically.
           </DialogDescription>
         </DialogHeader>
 

@@ -8,8 +8,9 @@
 //!
 //! 1. **Ephemeral by type.** [`Event::Status`] is fanned out but never
 //!    persisted. Agent telemetry is high-frequency and worthless once seen.
-//! 2. **The log is the truth.** Everything else is appended with a per-chat
-//!    monotonic `seq`, so a client reconnecting only needs its last cursor.
+//! 2. **Durable state is authoritative.** Chat content is appended with a
+//!    per-chat monotonic `seq`; security objects such as approvals have their
+//!    own transactional state machines and recovery endpoints.
 
 use serde::{Deserialize, Serialize};
 
@@ -24,10 +25,10 @@ pub type Millis = i64;
 
 /// Everything a client can ask the relay to do.
 ///
-/// `author` is explicit while auth is unimplemented; once tokens land it is
-/// derived from the connection and removed from the wire.
+/// Legacy author fields remain on the wire for adapters, but the relay derives
+/// and overwrites them from the authenticated human or paired machine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "t", rename_all = "camelCase")]
+#[serde(tag = "t", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Command {
     /// Post a message to a chat.
     Send {
@@ -64,6 +65,32 @@ pub enum Command {
         #[serde(default)]
         target: Option<String>,
     },
+
+    /// Ask the owner of an agent to release one exact local tool invocation.
+    /// The raw tool input never leaves the requesting machine; only its digest
+    /// and a deliberately bounded display projection cross the relay.
+    RequestApproval {
+        agent: Id,
+        chat: Id,
+        run: Id,
+        tool_call: Id,
+        provider: String,
+        tool: String,
+        display: ApprovalDisplay,
+        input_digest: String,
+        expires_in_ms: Millis,
+    },
+
+    /// Resolve a pending tool approval. The digest makes stale or mismatched
+    /// cards fail closed even when a client retries an old action.
+    ResolveApproval {
+        approval: Id,
+        decision: ApprovalDecision,
+        input_digest: String,
+    },
+
+    /// Withdraw a request when its provider turn is cancelled locally.
+    CancelApproval { approval: Id, reason: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +133,81 @@ pub enum Event {
     /// Tell the paired gateway to discard one provider conversation. The
     /// shared room transcript remains available as fresh context.
     SessionReset { chat: Id, member: Id },
+
+    /// Actionable approval details. The relay sends this only to the owning
+    /// human and the exact machine that requested it, never to the room.
+    ApprovalRequested { approval: Approval },
+
+    /// A terminal approval transition (allowed, denied, or cancelled).
+    ApprovalResolved { approval: Approval },
+
+    /// Expiry is distinct so clients can explain why no action was released.
+    ApprovalExpired { approval: Approval },
+}
+
+// ---------------------------------------------------------------------------
+// Tool approvals — a separate security protocol, never a chat `Ask`
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalDisplay {
+    /// Human-readable action summary, e.g. "Run database migration".
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ApprovalDecision {
+    AllowOnce,
+    Deny,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ApprovalState {
+    Pending,
+    Allowed,
+    Denied,
+    Expired,
+    Cancelled,
+}
+
+impl ApprovalState {
+    pub fn is_terminal(self) -> bool {
+        self != Self::Pending
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Approval {
+    pub id: Id,
+    pub owner_id: Id,
+    pub machine_id: Id,
+    pub agent_id: Id,
+    pub chat_id: Id,
+    pub run_id: Id,
+    pub tool_call_id: Id,
+    pub provider: String,
+    pub tool: String,
+    pub display: ApprovalDisplay,
+    pub input_digest: String,
+    pub state: ApprovalState,
+    pub expires_at: Millis,
+    pub created_at: Millis,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_at: Option<Millis>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_by: Option<Id>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_reason: Option<String>,
 }
 
 /// The durable unit. Field names match the client view model exactly, so the
@@ -338,6 +440,9 @@ impl Event {
             Event::Message { message } | Event::MessageUpdated { message } => &message.channel_id,
             Event::ChatUpdated { chat } => &chat.id,
             Event::Status { chat, .. } | Event::SessionReset { chat, .. } => chat,
+            Event::ApprovalRequested { approval }
+            | Event::ApprovalResolved { approval }
+            | Event::ApprovalExpired { approval } => &approval.chat_id,
         }
     }
 }
@@ -475,6 +580,33 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn approval_protocol_uses_distinct_typed_commands() {
+        let command = Command::RequestApproval {
+            agent: "a1".into(),
+            chat: "c1".into(),
+            run: "run_1".into(),
+            tool_call: "call_1".into(),
+            provider: "fake".into(),
+            tool: "Write".into(),
+            display: ApprovalDisplay {
+                summary: "Write one file?".into(),
+                project: Some("demo".into()),
+                target: Some("README.md".into()),
+                command: None,
+            },
+            input_digest: "a".repeat(64),
+            expires_in_ms: 30_000,
+        };
+        let encoded = serde_json::to_value(&command).unwrap();
+        assert_eq!(encoded["t"], "requestApproval");
+        assert_eq!(encoded["toolCall"], "call_1");
+        assert_eq!(encoded["display"]["target"], "README.md");
+        assert!(serde_json::from_value::<Command>(encoded).is_ok());
+        assert!(ApprovalState::Denied.is_terminal());
+        assert!(!ApprovalState::Pending.is_terminal());
     }
 
     #[test]

@@ -9,10 +9,9 @@
 //! the child's env so `claude` authenticates via `claude login` (the Agent SDK
 //! path refuses subscription auth — that's why we wrap the CLI, not the SDK).
 //!
-//! Design ported from harukitosa/claude-code-acp (MIT). Streaming + tool
-//! telemetry + resume are solid; the permission round-trip depends on Claude
-//! emitting a `permission_request` event in `-p` mode and is best-effort until
-//! validated against a live Claude (see the `permission_request` arm).
+//! Design ported from harukitosa/claude-code-acp (MIT). Streaming, tool
+//! telemetry, resume, and the private MCP permission bridge are kept in this
+//! small provider shim; subscription credentials never enter the SDK path.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -26,6 +25,7 @@ use agent_client_protocol::schema::v1::{
     ToolCall, ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
 use agent_client_protocol::{Agent, Result, Stdio as AcpStdio};
+use anyhow::{Context, Result as AnyhowResult};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -141,13 +141,26 @@ async fn main() -> Result<()> {
                     // calendar, contacts, …). They trigger macOS permission
                     // prompts attributed to `rebeam` and aren't the agent's job.
                     "--strict-mcp-config".into(),
-                    // Headless has no one at the terminal to approve tools, so a
-                    // gated tool just dead-ends ("please approve"). This is your
-                    // own agent on your own machine — let it run its tools, the
-                    // way your interactive `claude` does. (Human-in-the-loop
-                    // approval via the app is a separate, opt-in path.)
-                    "--dangerously-skip-permissions".into(),
+                    // Keep Claude's normal permission boundary. Gateway mode
+                    // adds the private permission-prompt MCP bridge below;
+                    // terminal mode has no remote approval authority.
+                    "--permission-mode".into(),
+                    "default".into(),
                 ];
+                let mcp_config = if std::env::var_os("REBEAM_MACHINE_TOKEN").is_some() {
+                    let config = write_permission_mcp_config()?;
+                    args.extend([
+                        "--mcp-config".into(),
+                        config.display().to_string(),
+                        "--permission-prompt-tool".into(),
+                        "mcp__rebeam_permissions__request".into(),
+                        "--allowedTools".into(),
+                        "mcp__rebeam_permissions__request".into(),
+                    ]);
+                    Some(config)
+                } else {
+                    None
+                };
                 // Resume this chat's Claude session so the agent remembers the
                 // conversation. Persisted per chat (REBEAM_CHAT) because the
                 // gateway spawns this adapter fresh on every message.
@@ -169,7 +182,10 @@ async fn main() -> Result<()> {
                     .stderr(Stdio::piped())
                     // Force subscription auth — no API-key fallback.
                     .env_remove("ANTHROPIC_API_KEY")
-                    .env_remove("ANTHROPIC_AUTH_TOKEN");
+                    .env_remove("ANTHROPIC_AUTH_TOKEN")
+                    // The machine credential is for the private MCP child,
+                    // never for Claude itself or a provider tool subprocess.
+                    .env_remove("REBEAM_MACHINE_TOKEN");
                 if let Some(cwd) = &cwd {
                     command.current_dir(cwd);
                 }
@@ -177,6 +193,9 @@ async fn main() -> Result<()> {
                 let mut child = match command.spawn() {
                     Ok(child) => child,
                     Err(err) => {
+                        if let Some(config) = &mcp_config {
+                            let _ = std::fs::remove_file(config);
+                        }
                         connection.send_notification(SessionNotification::new(
                             req.session_id.clone(),
                             SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
@@ -264,10 +283,9 @@ async fn main() -> Result<()> {
                                 }
                             }
                         }
-                        // Best-effort: if Claude surfaces a permission request, route
-                        // it to the ACP client (→ rebeam's Ask card). Enforcement of
-                        // the answer back into Claude needs the --permission-prompt-tool
-                        // MCP path; tracked as the next step.
+                        // Preserve legacy permission events for ACP clients that
+                        // expose them directly. Claude's print-mode enforcement
+                        // uses the private MCP permission tool above.
                         Some("permission_request") => {
                             tool_counter += 1;
                             let name = value
@@ -301,6 +319,10 @@ async fn main() -> Result<()> {
                     }
                 }
 
+                if let Some(config) = mcp_config {
+                    let _ = std::fs::remove_file(config);
+                }
+
                 if let Some(sid) = new_claude_session {
                     // Persist for the next message in this chat (continuity).
                     if let Ok(chat) = std::env::var("REBEAM_CHAT") {
@@ -322,4 +344,105 @@ async fn main() -> Result<()> {
         )
         .connect_to(AcpStdio::new())
         .await
+}
+
+fn write_permission_mcp_config() -> AnyhowResult<std::path::PathBuf> {
+    let executable =
+        rebeam_cli_path().context("the rebeam CLI is not available next to claude-code-acp")?;
+    let root = std::env::var_os("REBEAM_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".rebeam"))
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let dir = root.join("runs");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating private MCP directory {}", dir.display()))?;
+    let path = dir.join(format!("permission-{}.json", uuid::Uuid::new_v4().simple()));
+    let config = serde_json::json!({
+        "mcpServers": {
+            "rebeam_permissions": {
+                "command": executable,
+                "args": ["permission-mcp"],
+                "env": {
+                    "REBEAM_MACHINE_TOKEN": std::env::var("REBEAM_MACHINE_TOKEN")
+                        .context("machine credential is missing from the adapter")?
+                }
+            }
+        }
+    });
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, serde_json::to_vec(&config)?)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::rename(&temporary, &path)?;
+    Ok(path)
+}
+
+fn rebeam_cli_path() -> Option<std::path::PathBuf> {
+    if let Some(path) = std::env::var_os("REBEAM_CLI").map(std::path::PathBuf::from) {
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    let sibling = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))?;
+    for name in ["rebeam", "rebeam.exe"] {
+        let candidate = sibling.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+        .map(|path| path.join("rebeam"))
+        .find(|path| path.is_file())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn permission_config_is_private_and_contains_only_the_mcp_child_secret() {
+        let root = std::env::temp_dir().join(format!(
+            "rebeam-mcp-config-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let cli = root.join("rebeam");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&cli, "fake cli").unwrap();
+        std::env::set_var("REBEAM_HOME", &root);
+        std::env::set_var("REBEAM_CLI", &cli);
+        std::env::set_var("REBEAM_MACHINE_TOKEN", "rm_ephemeral_test");
+
+        let path = write_permission_mcp_config().unwrap();
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            config["mcpServers"]["rebeam_permissions"]["args"][0],
+            "permission-mcp"
+        );
+        assert_eq!(
+            config["mcpServers"]["rebeam_permissions"]["env"]["REBEAM_MACHINE_TOKEN"],
+            "rm_ephemeral_test"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+        std::env::remove_var("REBEAM_HOME");
+        std::env::remove_var("REBEAM_CLI");
+        std::env::remove_var("REBEAM_MACHINE_TOKEN");
+    }
 }

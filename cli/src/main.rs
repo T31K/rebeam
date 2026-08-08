@@ -11,9 +11,13 @@
 //! ```
 
 mod acp;
+mod approval;
+mod permission_mcp;
+mod runtime_setup;
 mod up;
 mod update;
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -51,11 +55,46 @@ struct Cli {
     author: String,
 
     #[command(subcommand)]
-    command: Verb,
+    command: Option<Verb>,
 }
 
 #[derive(Subcommand)]
 enum Verb {
+    /// Guided account, runtime, project, and agent setup
+    Setup {
+        /// Runtime ids to enable; repeat for more than one
+        #[arg(long = "runtime")]
+        runtimes: Vec<String>,
+        /// Project directory used for configured agents
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Agent name (valid only when enabling one runtime)
+        #[arg(long)]
+        agent_name: Option<String>,
+    },
+
+    /// Discover installed agent runtimes
+    Runtimes {
+        /// Emit the complete machine-local report as JSON
+        #[arg(long)]
+        json: bool,
+        /// Ignore the short discovery cache
+        #[arg(long)]
+        refresh: bool,
+    },
+
+    /// Inspect or enable one agent runtime
+    Runtime {
+        #[command(subcommand)]
+        action: RuntimeAction,
+    },
+
+    /// Sign this machine in to Rebeam
+    Auth {
+        #[command(subcommand)]
+        action: AuthAction,
+    },
+
     /// Install the newest Rebeam CLI release
     Update {
         /// Install a specific release tag, for example `v0.2.0`
@@ -179,9 +218,12 @@ enum Verb {
         /// Prompt to send (gateway mode reads $REBEAM_CONTEXT instead)
         #[arg(short = 'm', long)]
         message: Option<String>,
-        /// Deny every permission request instead of auto-allowing
+        /// Deny every permission request instead of asking
         #[arg(long)]
         deny: bool,
+        /// Explicitly allow every ACP permission request (unsafe)
+        #[arg(long, conflicts_with = "deny")]
+        allow_all: bool,
         /// Print the resolved adapter command and exit, without launching it
         #[arg(long)]
         dry_run: bool,
@@ -199,6 +241,10 @@ enum Verb {
 
     /// List chats
     Chats,
+
+    /// Internal stdio MCP permission bridge for the Claude adapter.
+    #[command(hide = true)]
+    PermissionMcp,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -228,6 +274,40 @@ enum ServiceAction {
     Install,
     Status,
     Uninstall,
+}
+
+#[derive(Clone, Subcommand)]
+enum AuthAction {
+    /// Link this machine through the Rebeam app
+    Login {
+        /// Name shown in the app's machine list
+        #[arg(long)]
+        machine_name: Option<String>,
+    },
+    /// Show the account and machine linked to this CLI
+    Status,
+    /// Revoke this machine credential and remove it locally
+    Logout,
+}
+
+#[derive(Clone, Subcommand)]
+enum RuntimeAction {
+    /// Install a provider adapter into Rebeam's private runtime directory
+    Install { id: String },
+    /// Explain one runtime's readiness and remediation
+    Doctor {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a ready runtime to the local supervisor configuration
+    Enable {
+        id: String,
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long)]
+        name: String,
+    },
 }
 
 impl AgentProvider {
@@ -262,10 +342,76 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> Result<ExitCode> {
+    let migrated = runtime_setup::migrate_legacy_config()?;
+    if migrated > 0 {
+        eprintln!(
+            "{} migrated {migrated} legacy agent profile(s)",
+            "✓".green()
+        );
+    }
     let cli = Cli::parse();
-    let client = reqwest::Client::new();
+    if matches!(&cli.command, Some(Verb::PermissionMcp)) {
+        permission_mcp::run().await?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    let client = authenticated_client()?;
 
-    match &cli.command {
+    let Some(command) = &cli.command else {
+        if !machine_session_valid(&client, &cli.relay).await? {
+            auth_login(&reqwest::Client::new(), &cli.relay, &hostname()).await?;
+        }
+        let client = authenticated_client()?;
+        if runtime_setup::has_configuration() {
+            runtime_setup::runtimes(&client, &cli.relay, false, false).await?;
+        } else {
+            runtime_setup::setup(&client, &cli.relay, Vec::new(), None, None).await?;
+        }
+        return Ok(ExitCode::SUCCESS);
+    };
+
+    match command {
+        Verb::Setup {
+            runtimes,
+            project,
+            agent_name,
+        } => {
+            if !machine_session_valid(&client, &cli.relay).await? {
+                auth_login(&reqwest::Client::new(), &cli.relay, &hostname()).await?;
+            }
+            // Rebuild the client after device auth so inventory upload carries
+            // the newly stored machine credential.
+            let client = authenticated_client()?;
+            runtime_setup::setup(
+                &client,
+                &cli.relay,
+                runtimes.clone(),
+                project.clone(),
+                agent_name.clone(),
+            )
+            .await?;
+        }
+        Verb::Runtimes { json, refresh } => {
+            runtime_setup::runtimes(&client, &cli.relay, *json, *refresh).await?;
+        }
+        Verb::Runtime { action } => match action {
+            RuntimeAction::Install { id } => {
+                runtime_setup::install(id).await?;
+            }
+            RuntimeAction::Doctor { id, json } => {
+                runtime_setup::doctor(id, *json).await?;
+            }
+            RuntimeAction::Enable { id, project, name } => {
+                runtime_setup::enable(&client, &cli.relay, id, project, name).await?;
+            }
+        },
+        Verb::Auth { action } => match action {
+            AuthAction::Login { machine_name } => {
+                let machine_name = machine_name.clone().unwrap_or_else(hostname);
+                auth_login(&reqwest::Client::new(), &cli.relay, &machine_name).await?;
+            }
+            AuthAction::Status => auth_status(&client, &cli.relay).await?,
+            AuthAction::Logout => auth_logout(&client, &cli.relay).await?,
+        },
         Verb::Update {
             version,
             repo,
@@ -568,6 +714,7 @@ async fn run() -> Result<ExitCode> {
             command,
             message,
             deny,
+            allow_all,
             dry_run,
             gateway,
             cwd,
@@ -584,8 +731,10 @@ async fn run() -> Result<ExitCode> {
             } else {
                 let approve = if *deny {
                     acp::Approve::Deny
-                } else {
+                } else if *allow_all {
                     acp::Approve::Auto
+                } else {
+                    acp::Approve::Ask
                 };
                 let (prompt, mode) = if *gateway {
                     // The gateway hands us the rendered context via env and the
@@ -614,6 +763,7 @@ async fn run() -> Result<ExitCode> {
                         chat,
                         agent: cli.author.clone(),
                         token,
+                        provider: provider.clone().unwrap_or_else(|| "custom-acp".into()),
                     };
                     (prompt, mode)
                 } else {
@@ -622,7 +772,7 @@ async fn run() -> Result<ExitCode> {
                         .context("pass -m <prompt> (or use --gateway)")?;
                     (prompt, acp::Mode::Terminal)
                 };
-                acp::run(&cmd, &prompt, approve, mode, cwd.clone()).await?;
+                acp::run(&cmd, &prompt, approve, mode, cwd.clone(), None).await?;
             }
         }
 
@@ -642,9 +792,7 @@ async fn run() -> Result<ExitCode> {
                 .and_then(|v| v.as_str())
                 .context("relay did not return a machine credential")?
                 .to_string();
-            let root = default_config_path().parent().unwrap().to_path_buf();
-            std::fs::create_dir_all(&root)?;
-            std::fs::write(root.join("machine-token"), token)?;
+            write_machine_token(&token)?;
             println!("{} machine paired", "✓".green());
         }
 
@@ -664,6 +812,8 @@ async fn run() -> Result<ExitCode> {
                 );
             }
         }
+
+        Verb::PermissionMcp => unreachable!("permission MCP was handled before authentication"),
     }
 
     Ok(ExitCode::SUCCESS)
@@ -718,6 +868,8 @@ async fn listen(
     chat: Option<&str>,
     json: bool,
 ) -> Result<()> {
+    let token =
+        read_machine_token()?.context("this machine is not signed in; run `rebeam auth login`")?;
     // Resolve the chat name to an id once, so filtering is a cheap comparison.
     let filter = match chat {
         Some(needle) => {
@@ -741,7 +893,9 @@ async fn listen(
         None => None,
     };
 
-    let ws_url = relay.replacen("http", "ws", 1) + "/stream";
+    // Machine credentials contain only the `rm_` prefix and hex digits, so
+    // they are safe as a query value without an additional encoding crate.
+    let ws_url = relay.replacen("http", "ws", 1) + "/stream?token=" + &token;
     let (socket, _) = tokio_tungstenite::connect_async(&ws_url)
         .await
         .with_context(|| format!("cannot open {ws_url}"))?;
@@ -811,6 +965,18 @@ fn print_event(event: &Event) {
             member.bold(),
             format!("in {chat}").dimmed()
         ),
+        Event::ApprovalRequested { approval } => println!(
+            "{} {} {}",
+            "approval".yellow().bold(),
+            approval.tool,
+            approval.id.dimmed()
+        ),
+        Event::ApprovalResolved { approval } | Event::ApprovalExpired { approval } => println!(
+            "{} {} {:?}",
+            "approval".yellow().bold(),
+            approval.id.dimmed(),
+            approval.state
+        ),
     }
 }
 
@@ -825,6 +991,278 @@ struct Joined {
 #[derive(serde::Deserialize)]
 struct JoinedChat {
     name: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceStartResponse {
+    device_code: String,
+    user_code: String,
+    expires_at: i64,
+    interval_seconds: u64,
+    verification_uri: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DevicePollResponse {
+    status: String,
+    token: Option<String>,
+    interval_seconds: Option<u64>,
+    machine: Option<CliMachine>,
+    error: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CliMachine {
+    id: String,
+    name: String,
+}
+
+#[derive(serde::Deserialize)]
+struct CliUser {
+    email: String,
+}
+
+#[derive(serde::Deserialize)]
+struct MachineAuthStatus {
+    user: CliUser,
+    machine: CliMachine,
+}
+
+async fn auth_login(client: &reqwest::Client, relay: &str, machine_name: &str) -> Result<()> {
+    let response = client
+        .post(format!("{relay}/auth/device/start"))
+        .json(&serde_json::json!({ "machineName": machine_name }))
+        .send()
+        .await
+        .with_context(|| format!("cannot reach the relay at {relay}"))?;
+    if !response.status().is_success() {
+        bail!("{}", error_body(response).await);
+    }
+    let authorization: DeviceStartResponse = response.json().await?;
+
+    println!("{}", "Authenticate this machine".bold());
+    if authorization.verification_uri.starts_with("http") {
+        println!("  Open: {}", authorization.verification_uri.cyan());
+    } else {
+        println!("  Open Rebeam → Preferences → Machines");
+    }
+    println!("  Enter: {}", authorization.user_code.cyan().bold());
+    println!("\n{}", "waiting for approval…".yellow());
+
+    let mut interval = authorization.interval_seconds.max(1);
+    while now_millis() < authorization.expires_at {
+        tokio::time::sleep(Duration::from_secs(interval)).await;
+        let response = client
+            .post(format!("{relay}/auth/device/token"))
+            .json(&serde_json::json!({ "deviceCode": authorization.device_code }))
+            .send()
+            .await?;
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let result: DevicePollResponse = serde_json::from_str(&body)
+            .with_context(|| format!("invalid device response ({status}): {body}"))?;
+        match result.status.as_str() {
+            "pending" => {
+                interval = result.interval_seconds.unwrap_or(interval).max(1);
+            }
+            "slowDown" => {
+                interval = result
+                    .interval_seconds
+                    .unwrap_or(interval + 1)
+                    .max(interval + 1);
+            }
+            "authorized" => {
+                let token = result
+                    .token
+                    .context("relay approved the machine without a credential")?;
+                write_machine_token(&token)?;
+                let machine = result.machine.context("relay omitted the machine record")?;
+                println!("{} signed in as {}", "✓".green(), machine.name.bold());
+                println!("  {}", format!("machine id: {}", machine.id).dimmed());
+                return Ok(());
+            }
+            "expired" | "invalid" => {
+                bail!(
+                    "{}",
+                    result
+                        .error
+                        .unwrap_or_else(|| "device authorization failed".into())
+                );
+            }
+            other => bail!("unexpected device authorization state {other:?}"),
+        }
+    }
+    bail!("device authorization expired; run `rebeam auth login` again")
+}
+
+async fn auth_status(client: &reqwest::Client, relay: &str) -> Result<()> {
+    if read_machine_token()?.is_none() {
+        println!("{} not signed in", "○".dimmed());
+        return Ok(());
+    }
+    let response = client.get(format!("{relay}/auth/machine")).send().await?;
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        println!("{} local credential is expired or revoked", "○".yellow());
+        return Ok(());
+    }
+    if !response.status().is_success() {
+        bail!("{}", error_body(response).await);
+    }
+    let status: MachineAuthStatus = response.json().await?;
+    println!("{} signed in", "●".green());
+    println!("  account: {}", status.user.email.bold());
+    println!("  machine: {}", status.machine.name.bold());
+    println!("  id:      {}", status.machine.id.dimmed());
+    Ok(())
+}
+
+async fn machine_session_valid(client: &reqwest::Client, relay: &str) -> Result<bool> {
+    if read_machine_token()?.is_none() {
+        return Ok(false);
+    }
+    let response = client
+        .get(format!("{relay}/auth/machine"))
+        .send()
+        .await
+        .with_context(|| format!("cannot reach the relay at {relay}"))?;
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Ok(false);
+    }
+    if !response.status().is_success() {
+        bail!("{}", error_body(response).await);
+    }
+    Ok(true)
+}
+
+async fn auth_logout(client: &reqwest::Client, relay: &str) -> Result<()> {
+    if read_machine_token()?.is_none() {
+        println!("{} already signed out", "✓".green());
+        return Ok(());
+    }
+    let response = client
+        .post(format!("{relay}/auth/machine/logout"))
+        .send()
+        .await;
+    let revoked_remotely = match response {
+        Ok(response)
+            if response.status().is_success()
+                || response.status() == reqwest::StatusCode::UNAUTHORIZED =>
+        {
+            true
+        }
+        Ok(response) => bail!("{}", error_body(response).await),
+        Err(error) => {
+            eprintln!(
+                "{} could not revoke remotely ({error}); removing the local credential",
+                "warning".yellow()
+            );
+            false
+        }
+    };
+    remove_machine_token()?;
+    if revoked_remotely {
+        println!("{} signed out and revoked this machine", "✓".green());
+    } else {
+        println!("{} signed out locally", "✓".green());
+        println!("  Revoke this machine in Rebeam when the relay is reachable.");
+    }
+    Ok(())
+}
+
+fn authenticated_client() -> Result<reqwest::Client> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    if let Some(token) = read_machine_token()? {
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {token}")
+                .parse()
+                .context("stored machine credential is invalid")?,
+        );
+    }
+    Ok(reqwest::Client::builder()
+        .default_headers(headers)
+        .build()?)
+}
+
+fn machine_token_path() -> PathBuf {
+    default_config_path()
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("machine-token")
+}
+
+fn read_machine_token() -> Result<Option<String>> {
+    let path = machine_token_path();
+    match std::fs::read_to_string(&path) {
+        Ok(token) => {
+            let token = token.trim().to_string();
+            Ok((!token.is_empty()).then_some(token))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+fn write_machine_token(token: &str) -> Result<()> {
+    let path = machine_token_path();
+    write_secret(&path, token)
+}
+
+fn write_secret(path: &Path, token: &str) -> Result<()> {
+    let root = path
+        .parent()
+        .context("machine credential path has no parent")?;
+    std::fs::create_dir_all(root)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
+    }
+
+    let temporary = root.join(format!(
+        ".machine-token-{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let write_result = (|| -> Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(token.as_bytes())?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        #[cfg(windows)]
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+        }
+        std::fs::rename(&temporary, path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    write_result.with_context(|| format!("saving {}", path.display()))
+}
+
+fn remove_machine_token() -> Result<()> {
+    let path = machine_token_path();
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("removing {}", path.display())),
+    }
 }
 
 /// The relay's refusal, which is usually the useful half of a failed connection.
@@ -1262,4 +1700,66 @@ fn read_stdin() -> Result<String> {
         .read_to_string(&mut buf)
         .context("reading stdin")?;
     Ok(buf.trim_end().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn auth_commands_are_part_of_the_public_cli() {
+        assert!(Cli::try_parse_from(["rebeam", "auth", "login"]).is_ok());
+        assert!(Cli::try_parse_from(["rebeam", "auth", "status"]).is_ok());
+        assert!(Cli::try_parse_from(["rebeam", "auth", "logout"]).is_ok());
+        assert!(Cli::try_parse_from(["rebeam"]).is_ok());
+        assert!(Cli::try_parse_from(["rebeam", "setup", "--runtime", "claude"]).is_ok());
+        assert!(Cli::try_parse_from(["rebeam", "runtimes", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["rebeam", "runtime", "doctor", "codex"]).is_ok());
+    }
+
+    #[test]
+    fn acp_permissions_ask_by_default_and_bulk_allow_is_explicit() {
+        let cli =
+            Cli::try_parse_from(["rebeam", "acp", "--provider", "codex", "--message", "test"])
+                .unwrap();
+        let Some(Verb::Acp {
+            deny, allow_all, ..
+        }) = cli.command
+        else {
+            panic!("ACP command was not parsed");
+        };
+        assert!(!deny);
+        assert!(!allow_all);
+        assert!(Cli::try_parse_from([
+            "rebeam",
+            "acp",
+            "--provider",
+            "codex",
+            "--deny",
+            "--allow-all"
+        ])
+        .is_err());
+        assert!(!include_str!("bin/claude-code-acp.rs").contains("dangerously-skip-permissions"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn machine_credentials_are_written_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "rebeam-cli-secret-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let path = root.join("machine-token");
+        write_secret(&path, "rm_test_secret").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "rm_test_secret\n");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir(root);
+    }
 }

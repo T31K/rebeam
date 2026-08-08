@@ -43,6 +43,43 @@ export interface Message {
   createdAt: number;
 }
 
+export type ApprovalState =
+  | "pending"
+  | "allowed"
+  | "denied"
+  | "expired"
+  | "cancelled";
+
+export type ApprovalDecision = "allowOnce" | "deny";
+
+export interface ApprovalDisplay {
+  summary: string;
+  project?: string;
+  target?: string;
+  command?: string;
+}
+
+/** A bounded relay projection of one exact machine-local tool invocation. */
+export interface Approval {
+  id: string;
+  ownerId: string;
+  machineId: string;
+  agentId: string;
+  chatId: string;
+  runId: string;
+  toolCallId: string;
+  provider: string;
+  tool: string;
+  display: ApprovalDisplay;
+  inputDigest: string;
+  state: ApprovalState;
+  expiresAt: number;
+  createdAt: number;
+  resolvedAt?: number;
+  resolvedBy?: string;
+  resolutionReason?: string;
+}
+
 /** How far back a new member may read. Resolved to a seq floor on redemption. */
 export type HistoryGrant =
   | { t: "all" }
@@ -100,7 +137,10 @@ export type StoreEvent =
       /** null closes the turn */
       item: Omit<TurnItem, "count" | "at"> | null;
     }
-  | { type: "channel.updated"; channel: Channel };
+  | { type: "channel.updated"; channel: Channel }
+  | { type: "approval.requested"; approval: Approval }
+  | { type: "approval.resolved"; approval: Approval }
+  | { type: "approval.expired"; approval: Approval };
 
 /**
  * The only surface the desktop app talks to. Phase 1 backs it with an
@@ -111,13 +151,20 @@ export interface Store {
   listChannels(): Promise<Channel[]>;
   listMembers(): Promise<Member[]>;
   listMessages(channelId: string): Promise<Message[]>;
+  /** Owner-scoped recovery after reconnect. Other room members never see these. */
+  listApprovals(): Promise<Approval[]>;
   sendMessage(channelId: string, text: string): Promise<Message>;
   resolveAsk(messageId: string, option: string): Promise<Message>;
+  resolveApproval(
+    approvalId: string,
+    decision: ApprovalDecision,
+    inputDigest: string,
+  ): Promise<Approval>;
   updateChannel(
     channelId: string,
     patch: Partial<Pick<Channel, "name" | "topic" | "avatarSeed" | "memberIds">>,
   ): Promise<Channel>;
-  createChannel(name: string, topic?: string): Promise<Channel>;
+  createChannel(name: string, topic?: string, agentId?: string): Promise<Channel>;
   /** Mint an invite to one chat. Whoever redeems it becomes a member of it. */
   createInvite(channelId: string, history?: HistoryGrant): Promise<Invite>;
   listMemberships(memberId: string): Promise<Membership[]>;

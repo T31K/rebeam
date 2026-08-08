@@ -16,6 +16,7 @@
 //! `rebeam connect <code>` writes that block. Everything else is a membership.
 
 use std::collections::HashMap;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -61,6 +62,8 @@ struct SessionRecord {
     session_id: Option<String>,
     #[serde(default)]
     initialized: bool,
+    #[serde(default)]
+    completed_seq: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -80,12 +83,15 @@ pub async fn run(relay: &str, config_path: &Path) -> Result<()> {
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
-    let token = std::fs::read_to_string(root.join("machine-token")).with_context(|| {
-        format!(
-            "no machine credential in {} — run `rebeam pair <code>` first",
-            root.display()
-        )
-    })?;
+    let token = std::fs::read_to_string(root.join("machine-token"))
+        .with_context(|| {
+            format!(
+                "no machine credential in {} — run `rebeam pair <code>` first",
+                root.display()
+            )
+        })?
+        .trim()
+        .to_string();
     let mut headers = HeaderMap::new();
     headers.insert(
         AUTHORIZATION,
@@ -113,19 +119,20 @@ pub async fn run(relay: &str, config_path: &Path) -> Result<()> {
         .json()
         .await?;
 
-    let mut agents = Vec::new();
-    for cfg in config {
-        let member = members
-            .iter()
-            .find(|m| m.name.eq_ignore_ascii_case(&cfg.name))
-            .with_context(|| {
-                format!(
-                    "{:?} is not a member — run `rebeam connect <code>` first",
-                    cfg.name
-                )
-            })?;
-        agents.push((cfg, member.clone()));
-    }
+    // Local profiles can outlive a relay membership (for example after a
+    // workspace is recreated). Ignore those stale profiles at startup; the
+    // reload path below will pick them up automatically if they are connected
+    // later. One disconnected profile must not take down every active agent.
+    let mut agents: Vec<(AgentConfig, Member)> = config
+        .into_iter()
+        .filter_map(|cfg| {
+            members
+                .iter()
+                .find(|m| m.name.eq_ignore_ascii_case(&cfg.name))
+                .cloned()
+                .map(|member| (cfg, member))
+        })
+        .collect();
 
     println!("{} {relay}", "rebeam gateway".bold());
     for (_, member) in &agents {
@@ -152,6 +159,13 @@ pub async fn run(relay: &str, config_path: &Path) -> Result<()> {
 
     loop {
         let frame = tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                if let Err(error) = result {
+                    eprintln!("{} shutdown signal: {error}", "warning".yellow());
+                }
+                crate::acp::cancel_all_gateway_sessions().await;
+                return Ok(());
+            }
             _ = reload.tick() => {
                 let Ok(response) = http.get(format!("{relay}/members")).send().await else {
                     continue;
@@ -203,6 +217,12 @@ pub async fn run(relay: &str, config_path: &Path) -> Result<()> {
         };
         let message = match event {
             Event::SessionReset { chat, member } => {
+                if let Some((_, configured)) = agents
+                    .iter()
+                    .find(|(_, configured)| configured.id == member)
+                {
+                    crate::acp::cancel_gateway_session(&configured.name, &chat).await;
+                }
                 let lock = turn_locks
                     .entry((member.clone(), chat.clone()))
                     .or_insert_with(|| Arc::new(Mutex::new(())))
@@ -269,6 +289,7 @@ pub async fn run(relay: &str, config_path: &Path) -> Result<()> {
             let http = http.clone();
             let relay = relay.to_string();
             let exec = cfg.exec.clone();
+            let machine_token = token.clone();
             let provider = cfg
                 .provider
                 .clone()
@@ -314,12 +335,35 @@ pub async fn run(relay: &str, config_path: &Path) -> Result<()> {
                     &provider,
                     &session_path,
                     &exec,
+                    &machine_token,
                     trigger,
                     &roster,
                 )
                 .await
                 {
                     eprintln!("{} {agent}: {err:#}", "error".red());
+                    append_gateway_log(
+                        &session_path,
+                        serde_json::json!({
+                            "event": "turn_failed",
+                            "agent": agent,
+                            "chat": chat,
+                            "provider": provider,
+                            "seq": msg.seq,
+                            "error": truncate(&format!("{err:#}"), 500),
+                        }),
+                    );
+                    status(
+                        &http,
+                        &relay,
+                        &agent,
+                        &chat,
+                        StatusState::Done,
+                        Some("provider unavailable"),
+                        None,
+                        None,
+                    )
+                    .await;
                 }
             });
         }
@@ -435,6 +479,7 @@ fn load_or_create_session(path: &Path, provider: &str) -> Result<SessionRecord> 
         provider: provider.to_string(),
         session_id: (provider == "claude").then(|| Uuid::new_v4().to_string()),
         initialized: false,
+        completed_seq: 0,
     })
 }
 
@@ -442,10 +487,19 @@ fn save_session(path: &Path, session: &SessionRecord) -> Result<()> {
     let parent = path.parent().context("session path has no parent")?;
     std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, toml::to_string_pretty(session)?)
+    let encoded = toml::to_string_pretty(session)?;
+    let mut file = std::fs::File::create(&tmp)
+        .with_context(|| format!("creating session {}", tmp.display()))?;
+    use std::io::Write as _;
+    file.write_all(encoded.as_bytes())
         .with_context(|| format!("writing session {}", tmp.display()))?;
+    file.sync_all()
+        .with_context(|| format!("syncing session {}", tmp.display()))?;
     std::fs::rename(&tmp, path)
         .with_context(|| format!("committing session {}", path.display()))?;
+    if let Ok(directory) = std::fs::File::open(parent) {
+        let _ = directory.sync_all();
+    }
     Ok(())
 }
 
@@ -550,15 +604,36 @@ async fn invoke(
     provider: &str,
     session_path: &Path,
     exec: &str,
+    machine_token: &str,
     trigger: Trigger,
     roster: &[Member],
 ) -> Result<()> {
+    append_gateway_log(
+        session_path,
+        serde_json::json!({
+            "event": "turn_started",
+            "agent": agent,
+            "chat": chat,
+            "provider": provider,
+            "seq": message.seq,
+        }),
+    );
     println!(
         "{} {} {}",
         "→".dimmed(),
         agent.bold(),
         truncate(&message.text, 60).dimmed()
     );
+
+    let mut session = load_or_create_session(session_path, provider)?;
+    if session.completed_seq >= message.seq {
+        let _ = http
+            .post(format!("{relay}/chats/{chat}/read"))
+            .json(&serde_json::json!({ "as": agent_id, "seq": message.seq }))
+            .send()
+            .await;
+        return Ok(());
+    }
 
     status(
         http,
@@ -579,8 +654,88 @@ async fn invoke(
         chat_name, &unread, message, members, agent_id, trigger, roster,
     );
 
-    let mut session = load_or_create_session(session_path, provider)?;
     let session_id = session.session_id.clone().unwrap_or_default();
+
+    // ACP gateway profiles run in-process so the worker cache in `acp` can
+    // keep one provider session alive for this chat. Custom shell profiles
+    // retain the legacy subprocess path.
+    if exec.trim_start().starts_with("rebeam acp") {
+        let command = crate::acp::adapter_command(provider)?;
+        let cwd = exec
+            .split_once("--cwd")
+            .map(|(_, value)| unquote_shell_value(value.trim()))
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        let outcome = crate::acp::run(
+            &command,
+            &context,
+            crate::acp::Approve::Ask,
+            crate::acp::Mode::Gateway {
+                relay: relay.to_string(),
+                chat: chat.to_string(),
+                agent: agent.to_string(),
+                token: machine_token.to_string(),
+                provider: provider.to_string(),
+            },
+            cwd,
+            session.initialized.then(|| session_id.clone()),
+        )
+        .await?;
+        if session.initialized && !outcome.resumed {
+            eprintln!(
+                "{} {provider} adapter cannot resume the saved session; started a clean session",
+                "warning".yellow()
+            );
+        }
+        if !outcome.text.trim().is_empty() {
+            let response = http
+                .post(format!("{relay}/commands"))
+                .json(&Cmd::Send {
+                    chat: chat.to_string(),
+                    author: agent.to_string(),
+                    text: outcome.text,
+                    idem: Some(format!("turn:{}:{}", agent_id, message.seq)),
+                })
+                .send()
+                .await?;
+            if !response.status().is_success() {
+                anyhow::bail!("relay rejected the reply: {}", response.text().await?);
+            }
+        }
+        let _ = http
+            .post(format!("{relay}/chats/{chat}/read"))
+            .json(&serde_json::json!({ "as": agent_id, "seq": message.seq }))
+            .send()
+            .await;
+        session.session_id = outcome.session_id.or(session.session_id);
+        session.initialized = session.session_id.is_some();
+        session.completed_seq = message.seq;
+        save_session(session_path, &session)?;
+        append_gateway_log(
+            session_path,
+            serde_json::json!({
+                "event": "turn_completed",
+                "agent": agent,
+                "chat": chat,
+                "provider": provider,
+                "seq": message.seq,
+                "sessionId": session.session_id,
+                "checkpointed": true,
+            }),
+        );
+        status(
+            http,
+            relay,
+            agent,
+            chat,
+            StatusState::Done,
+            None,
+            None,
+            None,
+        )
+        .await;
+        return Ok(());
+    }
 
     let out = tokio::process::Command::new("sh")
         .arg("-c")
@@ -619,6 +774,7 @@ async fn invoke(
         }
         // Claude starts from our UUID. Codex and Hermes must report theirs.
         session.initialized = session.session_id.is_some();
+        session.completed_seq = message.seq;
         save_session(session_path, &session)?;
     }
 
@@ -672,6 +828,53 @@ async fn invoke(
     }
     println!("{} {}", "←".dimmed(), agent.bold());
     Ok(())
+}
+
+fn append_gateway_log(session_path: &Path, mut event: serde_json::Value) {
+    let Some(root) = session_path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+    else {
+        return;
+    };
+    let directory = root.join("logs");
+    if std::fs::create_dir_all(&directory).is_err() {
+        return;
+    }
+    event["timestampMs"] = serde_json::json!(now_millis());
+    let Ok(encoded) = serde_json::to_vec(&event) else {
+        return;
+    };
+    let path = directory.join("gateway.jsonl");
+    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    use std::io::Write as _;
+    if file.write_all(&encoded).is_ok() && file.write_all(b"\n").is_ok() {
+        let _ = file.sync_data();
+    }
+}
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
+fn unquote_shell_value(value: &str) -> String {
+    let value = value.split_whitespace().next().unwrap_or_default();
+    value
+        .strip_prefix('\'')
+        .and_then(|value| value.strip_suffix('\''))
+        .or_else(|| {
+            value
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'))
+        })
+        .unwrap_or(value)
+        .replace("'\\''", "'")
 }
 
 /// The unseen window and the addressed message, in two labelled blocks.
@@ -1132,11 +1335,29 @@ mod tests {
         let mut session = load_or_create_session(&path, "claude").unwrap();
         assert!(session.session_id.is_some());
         session.initialized = true;
+        session.completed_seq = 42;
         save_session(&path, &session).unwrap();
         let restored = load_or_create_session(&path, "claude").unwrap();
         assert!(restored.initialized);
         assert_eq!(restored.session_id, session.session_id);
+        assert_eq!(restored.completed_seq, 42);
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn structured_gateway_log_is_jsonl_and_contains_no_prompt() {
+        let root = std::env::temp_dir().join(format!("rebeam-log-test-{}", Uuid::new_v4()));
+        let session = session_path(&root, "g_test", "a_test");
+        append_gateway_log(
+            &session,
+            serde_json::json!({"event":"turn_started","agent":"a_test","seq":7}),
+        );
+        let raw = std::fs::read_to_string(root.join("logs/gateway.jsonl")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
+        assert_eq!(value["event"], "turn_started");
+        assert!(value.get("timestampMs").is_some());
+        assert!(value.get("prompt").is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

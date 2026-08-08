@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import type { Member, Message } from "@agentchat/shared";
+import type { Approval, Member, Message } from "@agentchat/shared";
 import {
   MessageScroller,
   MessageScrollerButton,
@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/context-menu";
 import { MemberAvatar } from "@/components/member-avatar";
 import { ApprovalCard } from "@/components/chat/approval-card";
+import { AskCard } from "@/components/chat/ask-card";
 import { MessageText } from "@/components/chat/message-text";
 import {
   LoadingState,
@@ -70,20 +71,29 @@ function UnreadDivider({ count }: { count: number }) {
 }
 
 export function MessageList() {
-  const { messages, members, activeChannelId, unreadMarker } = useChat();
+  const { messages, approvals, members, activeChannelId, unreadMarker } = useChat();
 
   const grouped = useMemo(() => {
-    return messages.map((message, i) => {
-      const prev = messages[i - 1];
+    const timeline = [
+      ...messages.map((message) => ({ type: "message" as const, message, at: message.createdAt })),
+      ...approvals
+        .filter((approval) => approval.chatId === activeChannelId)
+        .map((approval) => ({ type: "approval" as const, approval, at: approval.createdAt })),
+    ].sort((left, right) => left.at - right.at);
+    return timeline.map((item, i) => {
+      if (item.type === "approval") return { ...item, continuation: false };
+      const previous = timeline[i - 1];
+      const prev = previous?.type === "message" ? previous.message : undefined;
+      const message = item.message;
       const continuation =
         prev != null &&
         prev.authorId === message.authorId &&
         prev.kind === "text" &&
         message.kind === "text" &&
         message.createdAt - prev.createdAt < GROUP_WINDOW_MS;
-      return { message, continuation };
+      return { ...item, continuation };
     });
-  }, [messages]);
+  }, [messages, approvals, activeChannelId]);
 
   return (
     <MessageScrollerProvider>
@@ -92,17 +102,21 @@ export function MessageList() {
           {/* Extra room at the foot so the newest message never sits flush
               against the composer — the crowding reads as a cut-off edge. */}
           <MessageScrollerContent className="gap-0 px-4 pt-3 pb-6">
-            {grouped.map(({ message, continuation }) => (
-              <MessageScrollerItem key={message.id}>
-                {unreadMarker?.channelId === activeChannelId &&
-                  unreadMarker.messageId === message.id && (
+            {grouped.map((item) => (
+              <MessageScrollerItem key={item.type === "message" ? item.message.id : item.approval.id}>
+                {item.type === "message" && unreadMarker?.channelId === activeChannelId &&
+                  unreadMarker.messageId === item.message.id && (
                     <UnreadDivider count={unreadMarker.count} />
                   )}
-                <MessageRow
-                  message={message}
-                  members={members}
-                  continuation={continuation}
-                />
+                {item.type === "message" ? (
+                  <MessageRow
+                    message={item.message}
+                    members={members}
+                    continuation={item.continuation}
+                  />
+                ) : (
+                  <ApprovalRow approval={item.approval} members={members} />
+                )}
               </MessageScrollerItem>
             ))}
           </MessageScrollerContent>
@@ -110,6 +124,23 @@ export function MessageList() {
         <MessageScrollerButton />
       </MessageScroller>
     </MessageScrollerProvider>
+  );
+}
+
+function ApprovalRow({ approval, members }: { approval: Approval; members: Member[] }) {
+  const agent = memberById(members, approval.agentId);
+  return (
+    <div className="mt-3 flex gap-3 rounded-md px-2 pt-1 pb-2">
+      <div className="w-7 shrink-0 pt-0.5">{agent && <MemberAvatar member={agent} />}</div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-baseline gap-2">
+          <span className="text-sm font-semibold">{agent?.name ?? approval.agentId}</span>
+          <span className="rounded border border-border px-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">agent</span>
+          <span className="text-[11px] text-muted-foreground">{formatTime(approval.createdAt)}</span>
+        </div>
+        <ApprovalCard approval={approval} />
+      </div>
+    </div>
   );
 }
 
@@ -199,7 +230,7 @@ function MessageRow({
             {DEMOS[message.demo]}
           </div>
         ) : message.kind === "ask" ? (
-          <ApprovalCard message={message} />
+          <AskCard message={message} />
         ) : (
           <MessageText text={message.text} members={members} />
         )}

@@ -9,13 +9,23 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rebeam_core::{
-    Chat, ChatKind, HistoryGrant, Invite, Member, MemberKind, Membership, Message, MessageKind,
-    Presence, Trigger,
+use argon2::{
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
 };
-use rusqlite::{params, Connection, OptionalExtension};
+use rand_core::OsRng;
+use rebeam_core::{
+    Approval, ApprovalDecision, ApprovalDisplay, ApprovalState, Chat, ChatKind, HistoryGrant,
+    Invite, Member, MemberKind, Membership, Message, MessageKind, Presence, Trigger,
+};
+use rusqlite::{params, Connection, ErrorCode, OptionalExtension};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+
+const ACCESS_TTL_MS: i64 = 60 * 60 * 1_000;
+const REFRESH_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
+const DEVICE_TTL_MS: i64 = 10 * 60 * 1_000;
+const DEVICE_POLL_INTERVAL_SECS: i64 = 2;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,15 +35,96 @@ pub struct User {
     pub name: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AuthSession {
     pub token: String,
+    pub refresh_token: String,
+    pub expires_at: i64,
     pub user: User,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PairingCode {
     pub code: String,
+}
+
+#[derive(Debug)]
+pub enum AuthError {
+    DuplicateEmail,
+    InvalidCredentials,
+    RateLimited,
+    Password,
+    Database(rusqlite::Error),
+}
+
+impl From<rusqlite::Error> for AuthError {
+    fn from(value: rusqlite::Error) -> Self {
+        Self::Database(value)
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineRecord {
+    pub id: String,
+    pub name: String,
+    pub created_at: i64,
+    pub last_seen: Option<i64>,
+    pub online: bool,
+    pub runtimes: Vec<serde_json::Value>,
+    pub runtime_updated_at: Option<i64>,
+}
+
+#[derive(Debug)]
+pub enum ApprovalCreate {
+    Created(Approval),
+    Existing(Approval),
+    Conflict,
+    TooMany,
+}
+
+#[derive(Debug)]
+pub enum ApprovalTransition {
+    Updated(Approval),
+    Expired(Approval),
+    DigestMismatch(Approval),
+    NotPending,
+    NotFound,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceAuthorization {
+    pub device_code: String,
+    pub user_code: String,
+    pub expires_at: i64,
+    pub interval_seconds: i64,
+}
+
+#[derive(Debug, Clone)]
+pub enum DevicePoll {
+    Pending {
+        interval_seconds: i64,
+    },
+    SlowDown {
+        interval_seconds: i64,
+    },
+    Authorized {
+        token: String,
+        machine: MachineRecord,
+    },
+    Expired,
+    Invalid,
+}
+
+struct PendingDeviceAuthorization {
+    machine_name: String,
+    expires_at: i64,
+    interval_seconds: i64,
+    approved_by: Option<String>,
+    consumed_at: Option<i64>,
+    last_polled_at: Option<i64>,
 }
 
 pub struct Store {
@@ -56,8 +147,8 @@ impl Store {
 
     // -- authentication ---------------------------------------------------
 
-    /// Create an anonymous, device-owned workspace. There is no password or
-    /// account: possession of the returned device credential is the boundary.
+    /// Development-only compatibility path. The HTTP handler refuses this in
+    /// production unless it has been explicitly enabled.
     pub fn bootstrap_workspace(&self) -> rusqlite::Result<AuthSession> {
         let id = format!("u_{}", uuid::Uuid::new_v4().simple());
         let user = User {
@@ -74,14 +165,131 @@ impl Store {
         Self::new_session(&conn, user)
     }
 
+    pub fn register(
+        &self,
+        email: &str,
+        name: &str,
+        password: &str,
+    ) -> Result<AuthSession, AuthError> {
+        let password_hash = hash_password(password)?;
+        let user = User {
+            id: format!("u_{}", uuid::Uuid::new_v4().simple()),
+            email: normalize_email(email),
+            name: name.trim().to_string(),
+        };
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        if let Err(error) = tx.execute(
+            "INSERT INTO users (id, email, name, password_hash, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![user.id, user.email, user.name, password_hash, now_millis()],
+        ) {
+            if is_constraint(&error) {
+                return Err(AuthError::DuplicateEmail);
+            }
+            return Err(AuthError::Database(error));
+        }
+        Self::ensure_user_member(&tx, &user)?;
+        let session = Self::new_session(&tx, user)?;
+        tx.commit()?;
+        Ok(session)
+    }
+
+    pub fn login(&self, email: &str, password: &str) -> Result<AuthSession, AuthError> {
+        let email = normalize_email(email);
+        let now = now_millis();
+        let (user, encoded): (User, String) = {
+            let conn = self.conn.lock().unwrap();
+            let recent_failures: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM login_failures
+                 WHERE email = ?1 AND failed_at >= ?2",
+                params![email, now - 15 * 60 * 1_000],
+                |row| row.get(0),
+            )?;
+            if recent_failures >= 10 {
+                return Err(AuthError::RateLimited);
+            }
+            let found = conn
+                .query_row(
+                    "SELECT id, email, name, password_hash FROM users WHERE email = ?1",
+                    params![email],
+                    |row| {
+                        Ok((
+                            User {
+                                id: row.get(0)?,
+                                email: row.get(1)?,
+                                name: row.get(2)?,
+                            },
+                            row.get(3)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some(found) = found else {
+                conn.execute(
+                    "INSERT INTO login_failures (email, failed_at) VALUES (?1, ?2)",
+                    params![email, now],
+                )?;
+                return Err(AuthError::InvalidCredentials);
+            };
+            found
+        };
+
+        if !verify_password(password, &encoded) {
+            let conn = self.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO login_failures (email, failed_at) VALUES (?1, ?2)",
+                params![email, now],
+            )?;
+            return Err(AuthError::InvalidCredentials);
+        }
+
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM login_failures WHERE email = ?1",
+            params![email],
+        )?;
+        Self::ensure_user_member(&conn, &user)?;
+        Ok(Self::new_session(&conn, user)?)
+    }
+
+    pub fn refresh_session(&self, refresh_token: &str) -> Result<AuthSession, AuthError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let user = tx
+            .query_row(
+                "SELECT users.id, users.email, users.name
+                 FROM sessions JOIN users ON users.id = sessions.user_id
+                 WHERE sessions.refresh_token_hash = ?1
+                   AND sessions.refresh_expires_at > ?2",
+                params![token_hash(refresh_token), now_millis()],
+                |row| {
+                    Ok(User {
+                        id: row.get(0)?,
+                        email: row.get(1)?,
+                        name: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or(AuthError::InvalidCredentials)?;
+        tx.execute(
+            "DELETE FROM sessions WHERE refresh_token_hash = ?1",
+            params![token_hash(refresh_token)],
+        )?;
+        let session = Self::new_session(&tx, user)?;
+        tx.commit()?;
+        Ok(session)
+    }
+
     pub fn user_for_token(&self, token: &str) -> rusqlite::Result<Option<User>> {
         let conn = self.conn.lock().unwrap();
         let user = conn
             .query_row(
                 "SELECT users.id, users.email, users.name
              FROM sessions JOIN users ON users.id = sessions.user_id
-             WHERE sessions.token_hash = ?1",
-                params![token_hash(token)],
+             WHERE sessions.token_hash = ?1 AND sessions.expires_at > ?2",
+                params![token_hash(token), now_millis()],
                 |r| {
                     Ok(User {
                         id: r.get(0)?,
@@ -110,10 +318,18 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT users.id, users.email, users.name FROM machine_tokens
-             JOIN users ON users.id = machine_tokens.workspace_id WHERE machine_tokens.token_hash = ?1",
+             JOIN users ON users.id = machine_tokens.workspace_id
+             WHERE machine_tokens.token_hash = ?1 AND machine_tokens.revoked_at IS NULL",
             params![token_hash(token)],
-            |r| Ok(User { id: r.get(0)?, email: r.get(1)?, name: r.get(2)? }),
-        ).optional()
+            |r| {
+                Ok(User {
+                    id: r.get(0)?,
+                    email: r.get(1)?,
+                    name: r.get(2)?,
+                })
+            },
+        )
+        .optional()
     }
 
     pub fn agent_belongs_to(&self, agent: &str, workspace: &str) -> rusqlite::Result<bool> {
@@ -128,15 +344,41 @@ impl Store {
             .is_some())
     }
 
+    /// Resolve an agent handle within its owning workspace. Handles are
+    /// globally human-readable, so seeded/legacy agents may share a name.
+    pub fn find_agent_for_owner(
+        &self,
+        needle: &str,
+        owner_id: &str,
+    ) -> rusqlite::Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id FROM members
+             WHERE kind = 'agent' AND owner_id = ?2
+               AND (id = ?1 COLLATE NOCASE OR name = ?1 COLLATE NOCASE)
+             LIMIT 1",
+            params![needle, owner_id],
+            |row| row.get(0),
+        )
+        .optional()
+    }
+
     pub fn machine_status(&self, workspace: &str) -> rusqlite::Result<(i64, i64)> {
         let conn = self.conn.lock().unwrap();
-        conn.query_row("SELECT COUNT(*), COALESCE(SUM(last_seen >= ?2), 0) FROM machine_tokens WHERE workspace_id = ?1", params![workspace, now_millis() - 45_000], |r| Ok((r.get(0)?, r.get(1)?)))
+        conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(last_seen >= ?2), 0)
+                        FROM machine_tokens
+                        WHERE workspace_id = ?1 AND revoked_at IS NULL",
+            params![workspace, now_millis() - 45_000],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
     }
 
     pub fn touch_machine(&self, token: &str) -> rusqlite::Result<bool> {
         let conn = self.conn.lock().unwrap();
         Ok(conn.execute(
-            "UPDATE machine_tokens SET last_seen = ?2 WHERE token_hash = ?1",
+            "UPDATE machine_tokens SET last_seen = ?2
+             WHERE token_hash = ?1 AND revoked_at IS NULL",
             params![token_hash(token), now_millis()],
         )? > 0)
     }
@@ -155,8 +397,9 @@ impl Store {
     }
 
     pub fn redeem_pairing(&self, code: &str) -> rusqlite::Result<Result<String, String>> {
-        let conn = self.conn.lock().unwrap();
-        let found: Option<(String, i64, Option<i64>)> = conn
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let found: Option<(String, i64, Option<i64>)> = tx
             .query_row(
                 "SELECT workspace_id, expires_at, redeemed_at FROM pairings WHERE code = ?1",
                 params![code],
@@ -170,21 +413,639 @@ impl Store {
             return Ok(Err("that pairing code has expired".into()));
         }
         let token = format!("rm_{}", uuid::Uuid::new_v4().simple());
-        conn.execute(
+        tx.execute(
             "UPDATE pairings SET redeemed_at = ?2 WHERE code = ?1",
             params![code, now_millis()],
         )?;
-        conn.execute("INSERT INTO machine_tokens (token_hash, workspace_id, created_at, last_seen) VALUES (?1, ?2, ?3, ?3)", params![token_hash(&token), workspace, now_millis()])?;
+        let machine_id = format!("machine_{}", uuid::Uuid::new_v4().simple());
+        tx.execute(
+            "INSERT INTO machine_tokens
+               (token_hash, workspace_id, created_at, last_seen, id, name)
+             VALUES (?1, ?2, ?3, ?3, ?4, 'Paired machine')",
+            params![token_hash(&token), workspace, now_millis(), machine_id],
+        )?;
+        tx.commit()?;
         Ok(Ok(token))
+    }
+
+    pub fn start_device_authorization(
+        &self,
+        machine_name: &str,
+    ) -> rusqlite::Result<DeviceAuthorization> {
+        let device_code = format!("rd_{}", uuid::Uuid::new_v4().simple());
+        let raw = uuid::Uuid::new_v4()
+            .simple()
+            .to_string()
+            .to_ascii_uppercase();
+        let user_code = format!("RBM-{}-{}-{}", &raw[..4], &raw[4..8], &raw[8..12]);
+        let expires_at = now_millis() + DEVICE_TTL_MS;
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO device_authorizations
+               (device_code_hash, user_code, machine_name, expires_at, interval_seconds, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                token_hash(&device_code),
+                user_code,
+                machine_name.trim(),
+                expires_at,
+                DEVICE_POLL_INTERVAL_SECS,
+                now_millis()
+            ],
+        )?;
+        Ok(DeviceAuthorization {
+            device_code,
+            user_code,
+            expires_at,
+            interval_seconds: DEVICE_POLL_INTERVAL_SECS,
+        })
+    }
+
+    pub fn approve_device(&self, user_code: &str, owner: &str) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE device_authorizations
+             SET approved_by = ?2, approved_at = ?3
+             WHERE user_code = ?1 COLLATE NOCASE
+               AND approved_by IS NULL
+               AND consumed_at IS NULL
+               AND expires_at > ?3",
+            params![user_code.trim(), owner, now_millis()],
+        )? > 0)
+    }
+
+    pub fn poll_device_authorization(&self, device_code: &str) -> rusqlite::Result<DevicePoll> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let found: Option<PendingDeviceAuthorization> = tx
+            .query_row(
+                "SELECT machine_name, expires_at, interval_seconds, approved_by,
+                        consumed_at, last_polled_at
+                 FROM device_authorizations WHERE device_code_hash = ?1",
+                params![token_hash(device_code)],
+                |row| {
+                    Ok(PendingDeviceAuthorization {
+                        machine_name: row.get(0)?,
+                        expires_at: row.get(1)?,
+                        interval_seconds: row.get(2)?,
+                        approved_by: row.get(3)?,
+                        consumed_at: row.get(4)?,
+                        last_polled_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()?;
+        let Some(found) = found else {
+            return Ok(DevicePoll::Invalid);
+        };
+        let now = now_millis();
+        if found.consumed_at.is_some() {
+            return Ok(DevicePoll::Invalid);
+        }
+        if now >= found.expires_at {
+            return Ok(DevicePoll::Expired);
+        }
+        if found
+            .last_polled_at
+            .is_some_and(|last| now - last < found.interval_seconds * 1_000)
+        {
+            return Ok(DevicePoll::SlowDown {
+                interval_seconds: found.interval_seconds + 1,
+            });
+        }
+        tx.execute(
+            "UPDATE device_authorizations SET last_polled_at = ?2 WHERE device_code_hash = ?1",
+            params![token_hash(device_code), now],
+        )?;
+        let Some(workspace) = found.approved_by else {
+            tx.commit()?;
+            return Ok(DevicePoll::Pending {
+                interval_seconds: found.interval_seconds,
+            });
+        };
+
+        let token = format!("rm_{}", uuid::Uuid::new_v4().simple());
+        let machine = MachineRecord {
+            id: format!("machine_{}", uuid::Uuid::new_v4().simple()),
+            name: if found.machine_name.trim().is_empty() {
+                "Rebeam CLI".to_string()
+            } else {
+                found.machine_name
+            },
+            created_at: now,
+            last_seen: Some(now),
+            online: true,
+            runtimes: Vec::new(),
+            runtime_updated_at: None,
+        };
+        tx.execute(
+            "INSERT INTO machine_tokens
+               (token_hash, workspace_id, created_at, last_seen, id, name)
+             VALUES (?1, ?2, ?3, ?3, ?4, ?5)",
+            params![token_hash(&token), workspace, now, machine.id, machine.name],
+        )?;
+        tx.execute(
+            "UPDATE device_authorizations SET consumed_at = ?2 WHERE device_code_hash = ?1",
+            params![token_hash(device_code), now],
+        )?;
+        tx.commit()?;
+        Ok(DevicePoll::Authorized { token, machine })
+    }
+
+    pub fn machines(&self, workspace: &str) -> rusqlite::Result<Vec<MachineRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let cutoff = now_millis() - 45_000;
+        let mut statement = conn.prepare(
+            "SELECT id, name, created_at, last_seen, runtime_inventory, runtime_updated_at
+             FROM machine_tokens
+             WHERE workspace_id = ?1 AND revoked_at IS NULL AND id IS NOT NULL
+             ORDER BY created_at DESC",
+        )?;
+        let rows = statement
+            .query_map(params![workspace], |row| {
+                let last_seen: Option<i64> = row.get(3)?;
+                Ok(MachineRecord {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    created_at: row.get(2)?,
+                    last_seen,
+                    online: last_seen.is_some_and(|seen| seen >= cutoff),
+                    runtimes: parse_inventory(row.get::<_, String>(4)?),
+                    runtime_updated_at: row.get(5)?,
+                })
+            })?
+            .collect();
+        rows
+    }
+
+    pub fn machine_for_credential(&self, token: &str) -> rusqlite::Result<Option<MachineRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let cutoff = now_millis() - 45_000;
+        conn.query_row(
+            "SELECT id, name, created_at, last_seen, runtime_inventory, runtime_updated_at
+             FROM machine_tokens
+             WHERE token_hash = ?1 AND revoked_at IS NULL AND id IS NOT NULL",
+            params![token_hash(token)],
+            |row| {
+                let last_seen: Option<i64> = row.get(3)?;
+                Ok(MachineRecord {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    created_at: row.get(2)?,
+                    last_seen,
+                    online: last_seen.is_some_and(|seen| seen >= cutoff),
+                    runtimes: parse_inventory(row.get::<_, String>(4)?),
+                    runtime_updated_at: row.get(5)?,
+                })
+            },
+        )
+        .optional()
+    }
+
+    pub fn update_runtime_inventory(&self, token: &str, inventory: &str) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE machine_tokens
+             SET runtime_inventory = ?2, runtime_updated_at = ?3, last_seen = ?3
+             WHERE token_hash = ?1 AND revoked_at IS NULL",
+            params![token_hash(token), inventory, now_millis()],
+        )? > 0)
+    }
+
+    pub fn revoke_machine(&self, workspace: &str, machine: &str) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE machine_tokens SET revoked_at = ?3
+             WHERE workspace_id = ?1 AND id = ?2 AND revoked_at IS NULL",
+            params![workspace, machine, now_millis()],
+        )? > 0)
+    }
+
+    pub fn revoke_machine_token(&self, token: &str) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE machine_tokens SET revoked_at = ?2
+             WHERE token_hash = ?1 AND revoked_at IS NULL",
+            params![token_hash(token), now_millis()],
+        )? > 0)
+    }
+
+    // -- tool approvals ---------------------------------------------------
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_approval(
+        &self,
+        owner: &str,
+        machine: &str,
+        agent: &str,
+        chat: &str,
+        run: &str,
+        tool_call: &str,
+        provider: &str,
+        tool: &str,
+        display: &ApprovalDisplay,
+        input_digest: &str,
+        expires_at: i64,
+    ) -> rusqlite::Result<ApprovalCreate> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let existing = tx
+            .query_row(
+                "SELECT id, owner_id, machine_id, agent_id, chat_id, run_id, tool_call_id,
+                        provider, tool, display, input_digest, state, expires_at, created_at,
+                        resolved_at, resolved_by, resolution_reason
+                 FROM approvals WHERE machine_id = ?1 AND run_id = ?2 AND tool_call_id = ?3",
+                params![machine, run, tool_call],
+                row_to_approval,
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            let same = existing.owner_id == owner
+                && existing.agent_id == agent
+                && existing.chat_id == chat
+                && existing.provider == provider
+                && existing.tool == tool
+                && existing.display == *display
+                && existing.input_digest == input_digest;
+            return Ok(if same {
+                ApprovalCreate::Existing(existing)
+            } else {
+                ApprovalCreate::Conflict
+            });
+        }
+        let pending: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM approvals WHERE machine_id = ?1 AND state = 'pending'",
+            params![machine],
+            |row| row.get(0),
+        )?;
+        if pending >= 100 {
+            return Ok(ApprovalCreate::TooMany);
+        }
+
+        let approval = Approval {
+            id: format!("apr_{}", uuid::Uuid::new_v4().simple()),
+            owner_id: owner.to_owned(),
+            machine_id: machine.to_owned(),
+            agent_id: agent.to_owned(),
+            chat_id: chat.to_owned(),
+            run_id: run.to_owned(),
+            tool_call_id: tool_call.to_owned(),
+            provider: provider.to_owned(),
+            tool: tool.to_owned(),
+            display: display.clone(),
+            input_digest: input_digest.to_owned(),
+            state: ApprovalState::Pending,
+            expires_at,
+            created_at: now_millis(),
+            resolved_at: None,
+            resolved_by: None,
+            resolution_reason: None,
+        };
+        tx.execute(
+            "INSERT INTO approvals
+               (id, owner_id, machine_id, agent_id, chat_id, run_id, tool_call_id,
+                provider, tool, display, input_digest, state, expires_at, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'pending', ?12, ?13)",
+            params![
+                approval.id,
+                approval.owner_id,
+                approval.machine_id,
+                approval.agent_id,
+                approval.chat_id,
+                approval.run_id,
+                approval.tool_call_id,
+                approval.provider,
+                approval.tool,
+                serde_json::to_string(&approval.display).unwrap(),
+                approval.input_digest,
+                approval.expires_at,
+                approval.created_at,
+            ],
+        )?;
+        append_approval_audit(
+            &tx,
+            &approval.id,
+            "machine",
+            machine,
+            None,
+            "pending",
+            "requested",
+        )?;
+        tx.commit()?;
+        Ok(ApprovalCreate::Created(approval))
+    }
+
+    pub fn approvals_for_owner(&self, owner: &str) -> rusqlite::Result<Vec<Approval>> {
+        self.expire_approvals()?;
+        let conn = self.conn.lock().unwrap();
+        let mut statement = conn.prepare(
+            "SELECT id, owner_id, machine_id, agent_id, chat_id, run_id, tool_call_id,
+                    provider, tool, display, input_digest, state, expires_at, created_at,
+                    resolved_at, resolved_by, resolution_reason
+             FROM approvals WHERE owner_id = ?1 ORDER BY created_at",
+        )?;
+        let approvals = statement
+            .query_map(params![owner], row_to_approval)?
+            .collect();
+        approvals
+    }
+
+    pub fn approval_for_owner(&self, id: &str, owner: &str) -> rusqlite::Result<Option<Approval>> {
+        self.expire_approvals()?;
+        self.approval_where("id = ?1 AND owner_id = ?2", id, owner)
+    }
+
+    pub fn approval_for_machine(
+        &self,
+        id: &str,
+        machine: &str,
+    ) -> rusqlite::Result<Option<Approval>> {
+        self.expire_approvals()?;
+        self.approval_where("id = ?1 AND machine_id = ?2", id, machine)
+    }
+
+    fn approval_where(
+        &self,
+        predicate: &str,
+        id: &str,
+        identity: &str,
+    ) -> rusqlite::Result<Option<Approval>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            &format!(
+                "SELECT id, owner_id, machine_id, agent_id, chat_id, run_id, tool_call_id,
+                        provider, tool, display, input_digest, state, expires_at, created_at,
+                        resolved_at, resolved_by, resolution_reason
+                 FROM approvals WHERE {predicate}"
+            ),
+            params![id, identity],
+            row_to_approval,
+        )
+        .optional()
+    }
+
+    pub fn resolve_approval(
+        &self,
+        id: &str,
+        owner: &str,
+        decision: ApprovalDecision,
+        input_digest: &str,
+    ) -> rusqlite::Result<ApprovalTransition> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let Some(current) = approval_in_transaction(&tx, id, "owner_id", owner)? else {
+            return Ok(ApprovalTransition::NotFound);
+        };
+        if current.state != ApprovalState::Pending {
+            return Ok(ApprovalTransition::NotPending);
+        }
+        let now = now_millis();
+        if now >= current.expires_at {
+            let expired = transition_approval(
+                &tx,
+                &current,
+                ApprovalState::Expired,
+                now,
+                None,
+                Some("expired"),
+            )?;
+            append_approval_audit(
+                &tx,
+                id,
+                "system",
+                "relay",
+                Some("pending"),
+                "expired",
+                "deadline reached",
+            )?;
+            tx.commit()?;
+            return Ok(ApprovalTransition::Expired(expired));
+        }
+        if current.input_digest != input_digest {
+            let denied = transition_approval(
+                &tx,
+                &current,
+                ApprovalState::Denied,
+                now,
+                Some(owner),
+                Some("input digest mismatch"),
+            )?;
+            append_approval_audit(
+                &tx,
+                id,
+                "human",
+                owner,
+                Some("pending"),
+                "denied",
+                "input digest mismatch",
+            )?;
+            tx.commit()?;
+            return Ok(ApprovalTransition::DigestMismatch(denied));
+        }
+        let next = match decision {
+            ApprovalDecision::AllowOnce => ApprovalState::Allowed,
+            ApprovalDecision::Deny => ApprovalState::Denied,
+        };
+        let updated = transition_approval(&tx, &current, next, now, Some(owner), None)?;
+        append_approval_audit(
+            &tx,
+            id,
+            "human",
+            owner,
+            Some("pending"),
+            approval_state_str(next),
+            "owner decision",
+        )?;
+        tx.commit()?;
+        Ok(ApprovalTransition::Updated(updated))
+    }
+
+    pub fn cancel_approval(
+        &self,
+        id: &str,
+        machine: &str,
+        reason: &str,
+    ) -> rusqlite::Result<ApprovalTransition> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let Some(current) = approval_in_transaction(&tx, id, "machine_id", machine)? else {
+            return Ok(ApprovalTransition::NotFound);
+        };
+        if current.state != ApprovalState::Pending {
+            return Ok(ApprovalTransition::NotPending);
+        }
+        let now = now_millis();
+        if now >= current.expires_at {
+            let expired = transition_approval(
+                &tx,
+                &current,
+                ApprovalState::Expired,
+                now,
+                None,
+                Some("expired"),
+            )?;
+            append_approval_audit(
+                &tx,
+                id,
+                "system",
+                "relay",
+                Some("pending"),
+                "expired",
+                "deadline reached",
+            )?;
+            tx.commit()?;
+            return Ok(ApprovalTransition::Expired(expired));
+        }
+        let cancelled = transition_approval(
+            &tx,
+            &current,
+            ApprovalState::Cancelled,
+            now,
+            Some(machine),
+            Some(reason),
+        )?;
+        append_approval_audit(
+            &tx,
+            id,
+            "machine",
+            machine,
+            Some("pending"),
+            "cancelled",
+            reason,
+        )?;
+        tx.commit()?;
+        Ok(ApprovalTransition::Updated(cancelled))
+    }
+
+    pub fn cancel_approvals_for_agent_chat(
+        &self,
+        agent: &str,
+        chat: &str,
+        reason: &str,
+    ) -> rusqlite::Result<Vec<Approval>> {
+        self.cancel_approvals_matching("agent_id = ?1 AND chat_id = ?2", agent, chat, reason)
+    }
+
+    pub fn cancel_approvals_for_machine(
+        &self,
+        machine: &str,
+        reason: &str,
+    ) -> rusqlite::Result<Vec<Approval>> {
+        self.cancel_approvals_matching(
+            "machine_id = ?1 AND machine_id = ?2",
+            machine,
+            machine,
+            reason,
+        )
+    }
+
+    fn cancel_approvals_matching(
+        &self,
+        predicate: &str,
+        first: &str,
+        second: &str,
+        reason: &str,
+    ) -> rusqlite::Result<Vec<Approval>> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let sql = format!(
+            "SELECT id, owner_id, machine_id, agent_id, chat_id, run_id, tool_call_id,
+                    provider, tool, display, input_digest, state, expires_at, created_at,
+                    resolved_at, resolved_by, resolution_reason
+             FROM approvals WHERE state = 'pending' AND {predicate}"
+        );
+        let pending = tx
+            .prepare(&sql)?
+            .query_map(params![first, second], row_to_approval)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let now = now_millis();
+        let mut cancelled = Vec::with_capacity(pending.len());
+        for current in pending {
+            let updated = transition_approval(
+                &tx,
+                &current,
+                ApprovalState::Cancelled,
+                now,
+                None,
+                Some(reason),
+            )?;
+            append_approval_audit(
+                &tx,
+                &current.id,
+                "system",
+                "relay",
+                Some("pending"),
+                "cancelled",
+                reason,
+            )?;
+            cancelled.push(updated);
+        }
+        tx.commit()?;
+        Ok(cancelled)
+    }
+
+    pub fn expire_approvals(&self) -> rusqlite::Result<Vec<Approval>> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let now = now_millis();
+        let pending = tx
+            .prepare(
+                "SELECT id, owner_id, machine_id, agent_id, chat_id, run_id, tool_call_id,
+                        provider, tool, display, input_digest, state, expires_at, created_at,
+                        resolved_at, resolved_by, resolution_reason
+                 FROM approvals WHERE state = 'pending' AND expires_at <= ?1",
+            )?
+            .query_map(params![now], row_to_approval)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut expired = Vec::with_capacity(pending.len());
+        for current in pending {
+            let updated = transition_approval(
+                &tx,
+                &current,
+                ApprovalState::Expired,
+                now,
+                None,
+                Some("expired"),
+            )?;
+            append_approval_audit(
+                &tx,
+                &current.id,
+                "system",
+                "relay",
+                Some("pending"),
+                "expired",
+                "deadline reached",
+            )?;
+            expired.push(updated);
+        }
+        tx.commit()?;
+        Ok(expired)
     }
 
     fn new_session(conn: &Connection, user: User) -> rusqlite::Result<AuthSession> {
         let token = format!("rb_{}", uuid::Uuid::new_v4().simple());
+        let refresh_token = format!("rr_{}", uuid::Uuid::new_v4().simple());
+        let now = now_millis();
+        let expires_at = now + ACCESS_TTL_MS;
         conn.execute(
-            "INSERT INTO sessions (token_hash, user_id, created_at) VALUES (?1, ?2, ?3)",
-            params![token_hash(&token), user.id, now_millis()],
+            "INSERT INTO sessions
+               (token_hash, user_id, created_at, expires_at, refresh_token_hash, refresh_expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                token_hash(&token),
+                user.id,
+                now,
+                expires_at,
+                token_hash(&refresh_token),
+                now + REFRESH_TTL_MS
+            ],
         )?;
-        Ok(AuthSession { token, user })
+        Ok(AuthSession {
+            token,
+            refresh_token,
+            expires_at,
+            user,
+        })
     }
 
     /// A signed-in person is also a chat member. Keeping these IDs equal lets
@@ -491,6 +1352,45 @@ impl Store {
             row_to_membership,
         )
         .optional()
+    }
+
+    /// Attach an already-owned agent to a chat created by its owner. This is
+    /// the local onboarding path; external guests still use redeemable invites.
+    pub fn attach_owned_agent(
+        &self,
+        chat: &str,
+        member: &str,
+        owner: &str,
+        now: i64,
+    ) -> rusqlite::Result<Option<Membership>> {
+        let conn = self.conn.lock().unwrap();
+        let owned: Option<String> = conn
+            .query_row(
+                "SELECT id FROM members WHERE id = ?1 AND kind = 'agent' AND owner_id = ?2",
+                params![member, owner],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if owned.is_none() {
+            return Ok(None);
+        }
+        let floor = Self::floor_for(&conn, chat, HistoryGrant::All)?;
+        conn.execute(
+            "INSERT INTO chat_members
+               (chat_id, member_id, invited_by, joined_at, history_floor_seq, cursor_seq, trigger)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, 'all')
+             ON CONFLICT (chat_id, member_id) DO NOTHING",
+            params![chat, member, owner, now, floor],
+        )?;
+        Ok(Some(Membership {
+            chat: chat.to_string(),
+            member: member.to_string(),
+            invited_by: Some(owner.to_string()),
+            joined_at: now,
+            history_floor_seq: floor,
+            cursor_seq: floor,
+            trigger: Trigger::All,
+        }))
     }
 
     pub fn memberships_of(&self, member: &str) -> rusqlite::Result<Vec<Membership>> {
@@ -839,6 +1739,126 @@ fn row_to_message(r: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
     })
 }
 
+fn row_to_approval(r: &rusqlite::Row<'_>) -> rusqlite::Result<Approval> {
+    let display: String = r.get(9)?;
+    Ok(Approval {
+        id: r.get(0)?,
+        owner_id: r.get(1)?,
+        machine_id: r.get(2)?,
+        agent_id: r.get(3)?,
+        chat_id: r.get(4)?,
+        run_id: r.get(5)?,
+        tool_call_id: r.get(6)?,
+        provider: r.get(7)?,
+        tool: r.get(8)?,
+        display: serde_json::from_str(&display).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                9,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        input_digest: r.get(10)?,
+        state: approval_state(r.get::<_, String>(11)?.as_str()),
+        expires_at: r.get(12)?,
+        created_at: r.get(13)?,
+        resolved_at: r.get(14)?,
+        resolved_by: r.get(15)?,
+        resolution_reason: r.get(16)?,
+    })
+}
+
+fn approval_in_transaction(
+    tx: &rusqlite::Transaction<'_>,
+    id: &str,
+    identity_column: &str,
+    identity: &str,
+) -> rusqlite::Result<Option<Approval>> {
+    tx.query_row(
+        &format!(
+            "SELECT id, owner_id, machine_id, agent_id, chat_id, run_id, tool_call_id,
+                    provider, tool, display, input_digest, state, expires_at, created_at,
+                    resolved_at, resolved_by, resolution_reason
+             FROM approvals WHERE id = ?1 AND {identity_column} = ?2"
+        ),
+        params![id, identity],
+        row_to_approval,
+    )
+    .optional()
+}
+
+fn transition_approval(
+    tx: &rusqlite::Transaction<'_>,
+    current: &Approval,
+    next: ApprovalState,
+    at: i64,
+    by: Option<&str>,
+    reason: Option<&str>,
+) -> rusqlite::Result<Approval> {
+    let changed = tx.execute(
+        "UPDATE approvals
+         SET state = ?2, resolved_at = ?3, resolved_by = ?4, resolution_reason = ?5
+         WHERE id = ?1 AND state = 'pending'",
+        params![current.id, approval_state_str(next), at, by, reason],
+    )?;
+    if changed != 1 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
+    let mut updated = current.clone();
+    updated.state = next;
+    updated.resolved_at = Some(at);
+    updated.resolved_by = by.map(str::to_owned);
+    updated.resolution_reason = reason.map(str::to_owned);
+    Ok(updated)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_approval_audit(
+    tx: &rusqlite::Transaction<'_>,
+    approval: &str,
+    actor_type: &str,
+    actor_id: &str,
+    from_state: Option<&str>,
+    to_state: &str,
+    reason: &str,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO approval_audit
+           (approval_id, actor_type, actor_id, from_state, to_state, reason, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            approval,
+            actor_type,
+            actor_id,
+            from_state,
+            to_state,
+            reason,
+            now_millis()
+        ],
+    )?;
+    Ok(())
+}
+
+fn approval_state(raw: &str) -> ApprovalState {
+    match raw {
+        "allowed" => ApprovalState::Allowed,
+        "denied" => ApprovalState::Denied,
+        "expired" => ApprovalState::Expired,
+        "cancelled" => ApprovalState::Cancelled,
+        _ => ApprovalState::Pending,
+    }
+}
+
+fn approval_state_str(state: ApprovalState) -> &'static str {
+    match state {
+        ApprovalState::Pending => "pending",
+        ApprovalState::Allowed => "allowed",
+        ApprovalState::Denied => "denied",
+        ApprovalState::Expired => "expired",
+        ApprovalState::Cancelled => "cancelled",
+    }
+}
+
 fn kind_str(kind: MessageKind) -> &'static str {
     match kind {
         MessageKind::Text => "text",
@@ -916,6 +1936,38 @@ fn token_hash(token: &str) -> String {
     format!("{:x}", Sha256::digest(token.as_bytes()))
 }
 
+fn parse_inventory(encoded: String) -> Vec<serde_json::Value> {
+    serde_json::from_str(&encoded).unwrap_or_default()
+}
+
+fn normalize_email(email: &str) -> String {
+    email.trim().to_ascii_lowercase()
+}
+
+fn hash_password(password: &str) -> Result<String, AuthError> {
+    let salt = SaltString::generate(&mut OsRng);
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|hash| hash.to_string())
+        .map_err(|_| AuthError::Password)
+}
+
+fn verify_password(password: &str, encoded: &str) -> bool {
+    PasswordHash::new(encoded).ok().is_some_and(|hash| {
+        Argon2::default()
+            .verify_password(password.as_bytes(), &hash)
+            .is_ok()
+    })
+}
+
+fn is_constraint(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(inner, _)
+            if inner.code == ErrorCode::ConstraintViolation
+    )
+}
+
 fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -942,6 +1994,17 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE members ADD COLUMN owner_id TEXT",
     "ALTER TABLE members ADD COLUMN host TEXT",
     "ALTER TABLE machine_tokens ADD COLUMN last_seen INTEGER",
+    "ALTER TABLE sessions ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE sessions ADD COLUMN refresh_token_hash TEXT",
+    "ALTER TABLE sessions ADD COLUMN refresh_expires_at INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE machine_tokens ADD COLUMN id TEXT",
+    "ALTER TABLE machine_tokens ADD COLUMN name TEXT NOT NULL DEFAULT 'Paired machine'",
+    "ALTER TABLE machine_tokens ADD COLUMN revoked_at INTEGER",
+    "ALTER TABLE machine_tokens ADD COLUMN runtime_inventory TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE machine_tokens ADD COLUMN runtime_updated_at INTEGER",
+    "UPDATE machine_tokens SET id = 'machine_' || substr(token_hash, 1, 32) WHERE id IS NULL",
+    "CREATE UNIQUE INDEX IF NOT EXISTS machine_tokens_id ON machine_tokens(id) WHERE id IS NOT NULL",
+    "CREATE UNIQUE INDEX IF NOT EXISTS sessions_refresh ON sessions(refresh_token_hash) WHERE refresh_token_hash IS NOT NULL",
 ];
 
 const SCHEMA: &str = r#"
@@ -955,15 +2018,43 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS sessions (
   token_hash TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  refresh_token_hash TEXT UNIQUE,
+  refresh_expires_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS login_failures (
+  email TEXT NOT NULL,
+  failed_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS login_failures_email_time ON login_failures(email, failed_at);
 CREATE TABLE IF NOT EXISTS pairings (
   code TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, expires_at INTEGER NOT NULL, redeemed_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS machine_tokens (
-  token_hash TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, created_at INTEGER NOT NULL, last_seen INTEGER
+  token_hash TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL,
+  last_seen INTEGER,
+  id TEXT UNIQUE,
+  name TEXT NOT NULL DEFAULT 'Paired machine',
+  revoked_at INTEGER,
+  runtime_inventory TEXT NOT NULL DEFAULT '[]',
+  runtime_updated_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id);
+CREATE TABLE IF NOT EXISTS device_authorizations (
+  device_code_hash TEXT PRIMARY KEY,
+  user_code TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  machine_name TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  interval_seconds INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  approved_by TEXT REFERENCES users(id) ON DELETE CASCADE,
+  approved_at INTEGER,
+  consumed_at INTEGER,
+  last_polled_at INTEGER
+);
 CREATE TABLE IF NOT EXISTS members (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL,
   presence TEXT NOT NULL DEFAULT 'offline', bio TEXT, position INTEGER DEFAULT 0,
@@ -1007,11 +2098,152 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS messages_chat_seq ON messages (chat_id, seq);
+CREATE TABLE IF NOT EXISTS approvals (
+  id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  machine_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+  chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL,
+  tool_call_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  tool TEXT NOT NULL,
+  display TEXT NOT NULL,
+  input_digest TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending', 'allowed', 'denied', 'expired', 'cancelled')),
+  expires_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  resolved_at INTEGER,
+  resolved_by TEXT,
+  resolution_reason TEXT,
+  UNIQUE (machine_id, run_id, tool_call_id)
+);
+CREATE INDEX IF NOT EXISTS approvals_owner_created ON approvals (owner_id, created_at);
+CREATE INDEX IF NOT EXISTS approvals_machine_created ON approvals (machine_id, created_at);
+CREATE INDEX IF NOT EXISTS approvals_pending_expiry ON approvals (expires_at) WHERE state = 'pending';
+CREATE TABLE IF NOT EXISTS approval_audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  approval_id TEXT NOT NULL REFERENCES approvals(id) ON DELETE CASCADE,
+  actor_type TEXT NOT NULL,
+  actor_id TEXT NOT NULL,
+  from_state TEXT,
+  to_state TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS approval_audit_approval ON approval_audit (approval_id, id);
 "#;
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+
+    fn temporary_database() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "rebeam-auth-test-{}.db",
+            uuid::Uuid::new_v4().simple()
+        ))
+    }
+
+    fn remove_database(path: &std::path::Path) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    #[test]
+    fn registered_accounts_are_distinct_and_survive_reopen() {
+        let path = temporary_database();
+        let (alice_id, bob_id) = {
+            let store = Store::open(path.to_str().unwrap()).unwrap();
+            let alice = store
+                .register(" Alice@Example.com ", "Alice", "correct horse")
+                .unwrap();
+            let bob = store
+                .register("bob@example.com", "Bob", "battery staple")
+                .unwrap();
+            assert_ne!(alice.user.id, bob.user.id);
+            (alice.user.id, bob.user.id)
+        };
+
+        let reopened = Store::open(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            reopened
+                .login("alice@example.com", "correct horse")
+                .unwrap()
+                .user
+                .id,
+            alice_id
+        );
+        assert_eq!(
+            reopened
+                .login("BOB@example.com", "battery staple")
+                .unwrap()
+                .user
+                .id,
+            bob_id
+        );
+        assert!(matches!(
+            reopened.login("alice@example.com", "wrong password"),
+            Err(AuthError::InvalidCredentials)
+        ));
+        assert!(matches!(
+            reopened.register("ALICE@example.com", "Other", "another password"),
+            Err(AuthError::DuplicateEmail)
+        ));
+        drop(reopened);
+        remove_database(&path);
+    }
+
+    #[test]
+    fn refreshing_rotates_both_session_credentials() {
+        let store = Store::open(":memory:").unwrap();
+        let first = store
+            .register("refresh@example.com", "Refresh", "refresh password")
+            .unwrap();
+        let refreshed = store.refresh_session(&first.refresh_token).unwrap();
+        assert_ne!(first.token, refreshed.token);
+        assert_ne!(first.refresh_token, refreshed.refresh_token);
+        assert!(store.user_for_token(&first.token).unwrap().is_none());
+        assert!(store.user_for_token(&refreshed.token).unwrap().is_some());
+        assert!(matches!(
+            store.refresh_session(&first.refresh_token),
+            Err(AuthError::InvalidCredentials)
+        ));
+    }
+
+    #[test]
+    fn device_authorization_is_single_use_and_revocable() {
+        let store = Store::open(":memory:").unwrap();
+        let owner = store
+            .register("owner@example.com", "Owner", "owner password")
+            .unwrap();
+        let pending = store.start_device_authorization("Build Mac").unwrap();
+        assert!(store
+            .approve_device(&pending.user_code, &owner.user.id)
+            .unwrap());
+
+        let DevicePoll::Authorized { token, machine } = store
+            .poll_device_authorization(&pending.device_code)
+            .unwrap()
+        else {
+            panic!("approved device did not receive a credential");
+        };
+        assert_eq!(machine.name, "Build Mac");
+        assert_eq!(
+            store.machine_for_token(&token).unwrap().unwrap().id,
+            owner.user.id
+        );
+        assert!(matches!(
+            store
+                .poll_device_authorization(&pending.device_code)
+                .unwrap(),
+            DevicePoll::Invalid
+        ));
+        assert!(store.revoke_machine(&owner.user.id, &machine.id).unwrap());
+        assert!(store.machine_for_token(&token).unwrap().is_none());
+    }
 
     #[test]
     fn chat_metadata_round_trips_and_can_be_cleared() {
@@ -1040,6 +2272,116 @@ mod tests {
             .unwrap();
         assert_eq!(cleared.topic, None);
         assert_eq!(cleared.avatar_seed, None);
+    }
+
+    #[test]
+    fn approvals_are_exactly_once_audited_and_fail_closed() {
+        let store = Store::open(":memory:").unwrap();
+        let owner = store.bootstrap_workspace().unwrap();
+        let chat = store
+            .create_chat("approval-test", None, &owner.user.id, now_millis())
+            .unwrap();
+        let agent = store
+            .upsert_agent("approval-agent", &owner.user.id, Some("test-host"))
+            .unwrap();
+        let invite = store
+            .create_invite(&chat.id, &owner.user.id, HistoryGrant::All, now_millis())
+            .unwrap()
+            .unwrap();
+        store
+            .redeem(&invite.code, &agent.id, now_millis())
+            .unwrap()
+            .unwrap();
+        let pairing = store.create_pairing(&owner.user.id).unwrap();
+        let token = store.redeem_pairing(&pairing.code).unwrap().unwrap();
+        let machine = store.machine_for_credential(&token).unwrap().unwrap();
+        let display = ApprovalDisplay {
+            summary: "Fake tool".into(),
+            project: None,
+            target: Some("fixture".into()),
+            command: None,
+        };
+
+        let ApprovalCreate::Created(first) = store
+            .create_approval(
+                &owner.user.id,
+                &machine.id,
+                &agent.id,
+                &chat.id,
+                "run-1",
+                "call-1",
+                "fake",
+                "FakeTool",
+                &display,
+                &"a".repeat(64),
+                now_millis() + 60_000,
+            )
+            .unwrap()
+        else {
+            panic!("approval was not created");
+        };
+        assert!(matches!(
+            store
+                .resolve_approval(
+                    &first.id,
+                    "wrong-owner",
+                    ApprovalDecision::AllowOnce,
+                    &"a".repeat(64)
+                )
+                .unwrap(),
+            ApprovalTransition::NotFound
+        ));
+        let ApprovalTransition::DigestMismatch(denied) = store
+            .resolve_approval(
+                &first.id,
+                &owner.user.id,
+                ApprovalDecision::AllowOnce,
+                &"b".repeat(64),
+            )
+            .unwrap()
+        else {
+            panic!("mismatch did not fail closed");
+        };
+        assert_eq!(denied.state, ApprovalState::Denied);
+        assert!(matches!(
+            store
+                .resolve_approval(
+                    &first.id,
+                    &owner.user.id,
+                    ApprovalDecision::AllowOnce,
+                    &"a".repeat(64)
+                )
+                .unwrap(),
+            ApprovalTransition::NotPending
+        ));
+
+        let ApprovalCreate::Created(expiring) = store
+            .create_approval(
+                &owner.user.id,
+                &machine.id,
+                &agent.id,
+                &chat.id,
+                "run-2",
+                "call-2",
+                "fake",
+                "FakeTool",
+                &display,
+                &"c".repeat(64),
+                now_millis() - 1,
+            )
+            .unwrap()
+        else {
+            panic!("expiring approval was not created");
+        };
+        let expired = store.expire_approvals().unwrap();
+        assert_eq!(expired[0].id, expiring.id);
+        assert_eq!(expired[0].state, ApprovalState::Expired);
+
+        let conn = store.conn.lock().unwrap();
+        let audit_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM approval_audit", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(audit_rows, 4, "request + deny + request + expiry");
     }
 }
 

@@ -137,8 +137,10 @@ see **`docs/AGENT_BRIDGE.md`** for the full architecture. Highlights:
   Wrapping the CLI is the only subscription path; **Buzz doesn't have it**.
 - **Session continuity** fixed by persisting Claude's `session_id` per chat and
   `--resume`-ing. **`--cwd`** binds an agent to a project dir (reads its docs).
-- The **approval card** is the moat (see below) — not built yet; today we stopgap
-  with `--dangerously-skip-permissions` for trusted personal agents.
+- The first-class **approval card** and local ACP broker are implemented. Claude
+  now fails closed without bypass permissions; its enforceable private
+  `--permission-prompt-tool` bridge is now wired for subscription-backed
+  Claude runs, with capability gating for older CLIs.
 
 ### The bridge is commoditising (competitive)
 Products already do "control your coding agent from chat with approvals":
@@ -184,7 +186,8 @@ crash; Buzz loses chat memory) and **subscription Claude** (they're API-key-only
 
 ### The permission model, straight
 Per-tool "approve from chat" is genuinely hard — **even Block punted.** The clean
-design: don't skip permissions and don't blanket-allow; route the ACP
-`request_permission` to the human (owner's phone for a lent agent), resume on the
-tap. Make it a **per-agent policy** (`trusted` vs `ask`). `--dangerously-skip-
-permissions` is a stopgap for your-own-agent-your-own-machine only.
+design is now implemented for native ACP: don't skip permissions or
+blanket-allow; route `request_permission` to the human (the owner for a lent
+agent), bind the decision to the exact input digest, and release it once. Claude
+uses the same permission-prompt MCP adapter as native ACP, with subscription
+credentials kept out of Claude's own environment.

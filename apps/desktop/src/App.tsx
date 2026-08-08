@@ -16,6 +16,7 @@ import { TitleBar } from "@/components/title-bar";
 import { StatusBar } from "@/components/status-bar";
 import { CommandPalette } from "@/components/command-palette";
 import { useChat } from "@/lib/use-chat";
+import { AuthPage } from "@/components/auth-page";
 
 function Shortcuts() {
   const { toggleSidebar } = useSidebar();
@@ -191,7 +192,8 @@ export default function App() {
     return () => window.removeEventListener("contextmenu", onContextMenu);
   }, []);
 
-  if (!authReady || !authed) return <div className="h-svh bg-background" />;
+  if (!authReady) return <div className="h-svh bg-background" />;
+  if (!authed) return <AuthPage />;
 
   return (
     <SidebarProvider
