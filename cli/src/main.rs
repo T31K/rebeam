@@ -10,6 +10,7 @@
 //! rebeam listen -c war-room --json
 //! ```
 
+mod acp;
 mod up;
 mod update;
 
@@ -160,6 +161,26 @@ enum Verb {
         /// Connect only; don't start the gateway
         #[arg(long)]
         no_gateway: bool,
+    },
+
+    /// Run an ACP-speaking agent for one prompt. rebeam provisions the adapter.
+    Acp {
+        /// Provider to auto-launch: claude | codex | gemini
+        #[arg(short, long)]
+        provider: Option<String>,
+        /// Explicit launcher command; overrides --provider,
+        /// e.g. "npx -y @agentclientprotocol/claude-agent-acp"
+        #[arg(short, long)]
+        command: Option<String>,
+        /// Prompt to send
+        #[arg(short = 'm', long)]
+        message: String,
+        /// Deny every permission request instead of auto-allowing
+        #[arg(long)]
+        deny: bool,
+        /// Print the resolved adapter command and exit, without launching it
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Pair this machine with a Rebeam workspace
@@ -511,6 +532,32 @@ async fn run() -> Result<ExitCode> {
                         }
                     }
                 }
+            }
+        }
+
+        Verb::Acp {
+            provider,
+            command,
+            message,
+            deny,
+            dry_run,
+        } => {
+            let cmd = match (command, provider) {
+                (Some(command), _) => command.clone(),
+                (None, Some(provider)) => acp::adapter_command(provider)?,
+                (None, None) => {
+                    bail!("pass --provider <claude|codex|gemini> or --command \"<acp launcher>\"")
+                }
+            };
+            if *dry_run {
+                println!("{cmd}");
+            } else {
+                let approve = if *deny {
+                    acp::Approve::Deny
+                } else {
+                    acp::Approve::Auto
+                };
+                acp::run(&cmd, message, approve).await?;
             }
         }
 
